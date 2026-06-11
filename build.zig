@@ -123,15 +123,24 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     // RISC-V firmware: freestanding, M-mode capable, soft-float (no F/D so we
-    // never have to manage the FPU before handing off). medany code model is
-    // required because we link at 0x80000000.
-    const target = b.resolveTargetQuery(.{
-        .cpu_arch = .riscv64,
-        .os_tag = .freestanding,
-        .abi = .none,
-        .cpu_features_add = std.Target.riscv.featureSet(&.{ .m, .a, .c }),
-        .cpu_features_sub = std.Target.riscv.featureSet(&.{ .d, .f }),
-    });
+    // never have to manage the FPU before handing off). medany code model (set
+    // per-module below) is required because we link at 0x80000000.
+    //
+    // We accept only `-Dcpu` (the nixpkgs zig build hook passes -Dcpu=baseline),
+    // never `-Dtarget`: the triple is always riscv64 freestanding. The cpu string
+    // is parsed by the same stdlib path standardTargetOptions uses, against our
+    // fixed triple, then the firmware's required features are pinned on top.
+    const mcpu = b.option([]const u8, "cpu", "Target CPU features to add or subtract");
+    var target_query = std.Build.parseTargetQuery(.{
+        .arch_os_abi = "riscv64-freestanding-none",
+        .cpu_features = mcpu,
+    }) catch |err| switch (err) {
+        // parseTargetQuery already printed the available CPUs/features to stderr.
+        error.ParseFailed => std.process.exit(1),
+    };
+    target_query.cpu_features_add.addFeatureSet(std.Target.riscv.featureSet(&.{ .m, .a, .c }));
+    target_query.cpu_features_sub.addFeatureSet(std.Target.riscv.featureSet(&.{ .d, .f }));
+    const target = b.resolveTargetQuery(target_query);
 
     // Let the platform's ACPI/DT description be supplied at build time so Weir
     // can use a provided AML/DTB instead of generating tables purely.
