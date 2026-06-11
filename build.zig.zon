@@ -1,0 +1,13 @@
+.{
+    .name = .weir,
+    .version = "0.1.0",
+    .fingerprint = 0x93848e0c20d4be2c,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .conduit = .{
+            .url = "git+https://github.com/Midstall/conduit#78c81472a6048b50be12ad3b6aaa52102434adda",
+            .hash = "conduit-0.1.0-R_mFrAI7AgDciuAw0J4H4XlpRHSUvDJgCvJAcaNxX-et",
+        },
+    },
+    .paths = .{""},
+}

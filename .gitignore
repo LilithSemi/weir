@@ -1,3 +1,11 @@
 .zig-cache/
+zig-pkg/
 zig-out/
 *.o
+
+# Generated/dumped device trees are passed via -Ddtb, never committed.
+*.dtb
+
+.direnv
+result
+result-*
