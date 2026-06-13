@@ -6,9 +6,13 @@ const conduit = @import("conduit");
 
 pub const Ns16550a = struct {
     base: usize,
+    /// Baud divisor (DLL/DLM) to program at init. River/Harbor's UART gates TX on
+    /// a nonzero divisor (baud = clock/divisor), so callers set this from
+    /// soc.uart_clock; 0 leaves the platform default (QEMU virt ignores it).
+    divisor: u16 = 0,
 
     fn dev(self: Ns16550a) conduit.driver.ns16550a.Ns16550a {
-        return .{ .mmio = conduit.Mmio.direct(self.base) };
+        return .{ .mmio = conduit.Mmio.direct(self.base), .divisor = self.divisor };
     }
 
     pub fn init(self: Ns16550a) void {

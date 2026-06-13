@@ -9,7 +9,7 @@ const cfg = @import("config.zig");
 
 pub const panic = std.debug.FullPanic(panicHandler);
 
-var con = uart.Ns16550a{ .base = cfg.uart_base };
+var con = uart.Ns16550a{ .base = cfg.uart_base, .divisor = cfg.uart_divisor };
 
 fn panicHandler(msg: []const u8, ret_addr: ?usize) noreturn {
     con.writeStr("\n[fsbl] PANIC: ");
@@ -21,6 +21,7 @@ fn panicHandler(msg: []const u8, ret_addr: ?usize) noreturn {
 
 pub fn run(hartid: usize, dtb: usize) noreturn {
     con.base = cfg.uart_base;
+    con.divisor = cfg.uart_divisor;
     con.init();
     con.writeStr("\n[fsbl] Weir FSBL: DDR bring-up + main load\n");
 

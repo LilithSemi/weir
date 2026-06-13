@@ -3,6 +3,7 @@
 const std = @import("std");
 const uart = @import("uart.zig");
 const platform = @import("../platform.zig");
+const soc = @import("soc");
 
 // Defaults to the common location; main() runs platform.discover() before
 // console.init(), so init() picks up a device-tree-provided UART address.
@@ -10,6 +11,10 @@ var dev = uart.Ns16550a{ .base = 0x10000000 };
 
 pub fn init() void {
     dev.base = platform.uartBase();
+    // River/Harbor's UART gates TX on a nonzero divisor; program 115200 so the
+    // console works even if main Weir runs without the FSBL having set it. QEMU
+    // virt ignores the divisor.
+    dev.divisor = @intCast(soc.uart_clock / 115200);
     dev.init();
 }
 

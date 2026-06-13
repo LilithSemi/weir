@@ -75,11 +75,43 @@ fn regSize(comptime m: Match) ?usize {
     return if (has_dt) regCell(m, true) else null;
 }
 
+/// Read a named big-endian u32 property (e.g. clock-frequency) from the first
+/// node matching `m`. Comptime.
+fn propU32(comptime m: Match, comptime pname: []const u8) ?u32 {
+    @setEvalBranchQuota(QUOTA);
+    var iter = reader().nodeIterator();
+    var matched = false;
+    var value: ?u32 = null;
+    while (iter.next() catch return null) |node| {
+        switch (node) {
+            .begin => |b| {
+                matched = if (m.name) |nm| std.mem.startsWith(u8, b.name, nm) else false;
+                value = null;
+            },
+            .prop => |pr| {
+                if (m.compatible) |c| {
+                    if (std.mem.eql(u8, pr.name, "compatible") and hasCompatible(pr.value, c)) matched = true;
+                }
+                if (std.mem.eql(u8, pr.name, pname)) {
+                    if (pr.value.len >= 4) value = std.mem.readInt(u32, pr.value[0..4], .big);
+                }
+            },
+            .end => {},
+        }
+        if (matched) if (value) |v| return v;
+    }
+    return null;
+}
+
 // Peripheral addresses, read once at comptime. Fall back to QEMU virt / common
 // values when no tree is embedded or it omits a node.
 pub const ram_base: usize = regBase(.{ .name = "memory" }) orelse 0x80000000;
 pub const ram_size: usize = regSize(.{ .name = "memory" }) orelse 0x10000000;
 pub const uart_base: usize = regBase(.{ .compatible = "ns16550a" }) orelse 0x10000000;
+/// UART input clock (Hz). River/Harbor's UART gates TX on a nonzero divisor
+/// (baud = clock/divisor), so the driver must program it; QEMU virt ignores it.
+pub const uart_clock: usize =
+    (if (has_dt) propU32(.{ .compatible = "ns16550a" }, "clock-frequency") else null) orelse 12000000;
 pub const clint_base: usize = regBase(.{ .compatible = "riscv,clint0" }) orelse 0x2000000;
 
 // On-chip SRAM the FSBL runs from, and the XIP SPI flash holding the main image.
