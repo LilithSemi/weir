@@ -15,7 +15,7 @@ const varstore = @import("varstore.zig");
 const handledb = @import("handledb.zig");
 const blockio = @import("blockio.zig");
 const initrd = @import("initrd.zig");
-const fdt = @import("../fdt/fdt.zig");
+const soc = @import("soc");
 const smbios = @import("smbios.zig");
 const acpi_qemu = @import("../acpi/qemu.zig");
 const platform = @import("../platform.zig");
@@ -618,11 +618,10 @@ pub fn prepare(dtb: usize, hartid: usize, image_base: usize, image_size: usize) 
     boot_hartid = hartid;
     image_handle = handledb.create();
 
-    // Size the memory map to real RAM from the DTB (clamped above our page pool)
-    // so a large kernel + initrd has room. Falls back to the default.
-    if (fdt.ramEnd(dtb)) |top| {
-        if (top > PAGE_POOL_BASE + 0x100000) RAM_END = top;
-    }
+    // Size the memory map to real RAM from the comptime SoC tree (soc.zig),
+    // clamped above our page pool so a large kernel + initrd has room.
+    const ram_top = soc.ram_base + soc.ram_size;
+    if (ram_top > PAGE_POOL_BASE + 0x100000) RAM_END = ram_top;
 
     // Simple Text Output: real output, the rest succeed as no-ops.
     con_out_mode = .{ .max_mode = 1, .mode = 0, .attribute = 0x07, .cursor_column = 0, .cursor_row = 0, .cursor_visible = true };

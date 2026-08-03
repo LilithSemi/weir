@@ -3,7 +3,6 @@
 const std = @import("std");
 const console = @import("console/console.zig");
 const config = @import("config.zig");
-const fdt = @import("fdt/fdt.zig");
 const acpi = @import("acpi/acpi.zig");
 const acpi_qemu = @import("acpi/qemu.zig");
 const platform = @import("platform.zig");
@@ -45,6 +44,92 @@ const banner =
     \\
 ;
 
+inline fn bmark(comptime c: u8) void {
+    asm volatile (
+        \\ lui t0, 0x10000
+        \\1:
+        \\ lbu t1, 5(t0)
+        \\ andi t1, t1, 0x20
+        \\ beqz t1, 1b
+        \\ sb %[ch], 0(t0)
+        :
+        : [ch] "r" (@as(usize, c)),
+        : .{ .t0 = true, .t1 = true });
+}
+
+// TEMP diagnostic: raw-UART putc (runtime), rides the FSBL divisor.
+fn putc(c: u8) void {
+    asm volatile (
+        \\ lui t0, 0x10000
+        \\1:
+        \\ lbu t1, 5(t0)
+        \\ andi t1, t1, 0x20
+        \\ beqz t1, 1b
+        \\ sb %[ch], 0(t0)
+        :
+        : [ch] "r" (@as(usize, c)),
+        : .{ .t0 = true, .t1 = true });
+}
+
+// TEMP diagnostic: raw-UART hex, rides the FSBL divisor (pre-console).
+fn dbgHex(v: u32) void {
+    var i: i32 = 28;
+    putc('0');
+    putc('x');
+    while (i >= 0) : (i -= 4) {
+        const nib: u8 = @intCast((v >> @intCast(i)) & 0xF);
+        putc(if (nib < 10) '0' + nib else 'a' + (nib - 10));
+    }
+}
+
+// TEMP diagnostic: discriminate DRAM read-margin from write-margin. Write each
+// word ONCE with an address-derived unique value, then read it back THREE times.
+//   clean  = all three reads == expected
+//   cwrong = all three reads equal but != expected (write margin / addressing)
+//   rflaky = the three reads disagree (read-capture margin)
+// Failure counts + the first failing address discriminate the fault class with
+// no assumption about which side is marginal.
+fn dramSelfTest() void {
+    const base: usize = 0x84000000;
+    const words: usize = 0x4000; // 64 KiB
+    var clean: u32 = 0;
+    var cwrong: u32 = 0;
+    var rflaky: u32 = 0;
+    var firstFail: u32 = 0xFFFFFFFF;
+    var p: usize = 0;
+    while (p < words) : (p += 1) {
+        const a = base + p * 4;
+        const want: u32 = @truncate((a ^ 0xDEADBEEF) *% 2654435761);
+        @as(*volatile u32, @ptrFromInt(a)).* = want;
+        const r1 = @as(*volatile u32, @ptrFromInt(a)).*;
+        const r2 = @as(*volatile u32, @ptrFromInt(a)).*;
+        const r3 = @as(*volatile u32, @ptrFromInt(a)).*;
+        if (r1 == want and r2 == want and r3 == want) {
+            clean += 1;
+        } else {
+            if (firstFail == 0xFFFFFFFF) firstFail = @truncate(a);
+            if (r1 == r2 and r2 == r3) cwrong += 1 else rflaky += 1;
+        }
+    }
+    bmark('[');
+    bmark('S');
+    bmark('T');
+    bmark(' ');
+    bmark('c');
+    dbgHex(clean);
+    bmark(' ');
+    bmark('w');
+    dbgHex(cwrong);
+    bmark(' ');
+    bmark('f');
+    dbgHex(rflaky);
+    bmark(' ');
+    bmark('@');
+    dbgHex(firstFail);
+    bmark(']');
+    bmark('\n');
+}
+
 pub fn boot(hartid: usize, dtb: usize) void {
     // Prefer a build-embedded DTB, else what the platform gave us.
     const dtb_addr = if (config.dtb) |d| @intFromPtr(d.ptr) else dtb;
@@ -58,7 +143,6 @@ pub fn boot(hartid: usize, dtb: usize) void {
     console.printf("[weir] boot hart {d}, dtb @ {x}\n", .{ hartid, dtb_addr });
     if (config.dtb != null) console.writeStr("[fdt] using build-embedded device tree (-Ddtb)\n");
     platform.report();
-    fdt.inspect(dtb_addr);
 
     // On QEMU, consume the machine's own fw_cfg tables (DSDT/MADT/RHCT matching
     // the hardware). Else wrap a provided AML blob (the real-River path).
@@ -88,13 +172,28 @@ pub fn boot(hartid: usize, dtb: usize) void {
     }
     tpm.selfTest();
 
-    // Prove the trap -> SBI path end to end with an M-mode ecall.
-    console.writeStr("[sbi] self-test: console_putchar('Y') via ecall -> ");
-    asm volatile ("ecall"
-        :
-        : [eid] "{a7}" (@as(usize, 0x01)),
-          [ch] "{a0}" (@as(usize, 'Y')),
-        : .{ .memory = true });
+    // Prove the trap -> SBI path end to end with an M-mode ecall. The creek
+    // microcode trap-return (mret) hang that gated this off is fixed (the dynamic
+    // interpreter now handles the Return micro-op), so it is back on.
+    const sbi_self_test = true;
+    if (sbi_self_test) {
+        console.writeStr("[sbi] self-test: console_putchar('Y') via ecall -> ");
+        asm volatile ("ecall"
+            :
+            : [eid] "{a7}" (@as(usize, 0x01)),
+              [ch] "{a0}" (@as(usize, 'Y')),
+            : .{ .memory = true });
+        console.writeStr(" (resumed after mret)\n");
+    }
+
+    // Prove wfi retires on real silicon. creek implements wfi as a NOP-hint that
+    // advances pc+4 (it does not actually stall), so this must fall straight
+    // through and print "resumed". If it hangs here, the dynamic-interpreter wfi
+    // handler regressed.
+    console.writeStr("[wfi] executing wfi -> ");
+    asm volatile ("wfi" ::: .{ .memory = true });
+    console.writeStr("resumed\n");
+
     console.writeStr("\n[weir] M-mode bring-up complete, dropping to S-mode\n");
 }
 
@@ -105,17 +204,29 @@ pub const Handoff = struct {
     a1: usize,
 };
 
-// Scratch buffer for an image read off storage (low firmware RAM, clear of the
-// PE load base at 0x8200_0000).
-var disk_image: [8 << 20]u8 align(16) = undefined;
+// Scratch buffer for an image read off storage. Only the disk-boot path uses it;
+// sizing it to 0 when disk boot is off keeps 8 MiB out of .bss, which the M-mode
+// bss clear would otherwise zero at ~26us/word on the slow microcoded core (an
+// 8 MiB zero was ~55s of the boot).
+const disk_image_len: usize = if (config.disk_boot) 8 << 20 else 0;
+var disk_image: [disk_image_len]u8 align(16) = undefined;
 
-// Firmware-resident DTB copy. The platform DTB sits high in RAM inside the
-// region we advertise as free, so an EFI app could overwrite it; hand the app
-// this copy in low, reserved firmware memory instead.
-var dtb_copy: [256 << 10]u8 align(8) = undefined;
+// Firmware-resident DTB copy, handed to an EFI app in reserved low RAM. Only the
+// UEFI/PE and boot-manager handoff paths use it (via stableDtb); size 0 when none
+// are enabled so it does not bloat the zeroed bss.
+const dtb_copy_len: usize =
+    if (config.disk_boot or config.boot_manager or config.pe_app != null)
+        256 << 10
+    else
+        0;
+var dtb_copy: [dtb_copy_len]u8 align(8) = undefined;
 
 fn stableDtb(dtb: usize) usize {
-    const total = fdt.totalSize(dtb) orelse return dtb;
+    if (dtb == 0) return dtb;
+    const hp: [*]const u8 = @ptrFromInt(dtb);
+    // FDT header: big-endian magic (0xd00dfeed) at +0, totalsize at +4.
+    if (std.mem.readInt(u32, hp[0..4], .big) != 0xd00dfeed) return dtb;
+    const total = std.mem.readInt(u32, hp[4..8], .big);
     if (total == 0 or total > dtb_copy.len) return dtb;
     @memcpy(dtb_copy[0..total], @as([*]const u8, @ptrFromInt(dtb))[0..total]);
     return @intFromPtr(&dtb_copy);
@@ -181,8 +292,13 @@ pub fn handoff(hartid: usize, dtb: usize) Handoff {
     if (config.payload) |image| {
         console.printf("[loader] loading embedded S-mode payload, {d} bytes\n", .{image.len});
         if (elf.load(image)) |entry| {
-            console.printf("[loader] payload entry @ {x}\n", .{entry});
-            return .{ .entry = entry, .a0 = hartid, .a1 = dtb };
+            // Hand the payload the DTB Weir actually discovered on: the embedded
+            // -Ddtb tree when present, else the platform/FSBL pointer. Passing the
+            // raw `dtb` (a null/stale FSBL pointer on this SoC) sent the payload
+            // reading a bad address and hanging.
+            const payload_dtb = if (config.dtb) |d| @intFromPtr(d.ptr) else dtb;
+            console.printf("[loader] payload entry @ {x}, dtb @ {x}\n", .{ entry, payload_dtb });
+            return .{ .entry = entry, .a0 = hartid, .a1 = payload_dtb };
         } else |err| {
             console.printf("[loader] ELF load failed: {s}\n", .{@errorName(err)});
         }

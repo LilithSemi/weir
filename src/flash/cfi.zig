@@ -11,10 +11,20 @@
 const std = @import("std");
 const console = @import("../console/console.zig");
 
-/// Second flash bank (0x2200_0000). With `-bios`, Weir runs from RAM and the
-/// flash banks are free, so we use this one for the variable store.
-pub const BASE: usize = 0x22000000;
+/// CFI NOR flash bank base, set from the DTB at discovery. 0 means no CFI flash
+/// exists on this platform (e.g. a real River SoC, whose flash is SPI, not a
+/// memory-mapped CFI bank). Probing a hardcoded address blind faults on a bus
+/// with no device mapped there, so init() guards on base != 0.
+/// On QEMU virt the second bank (0x2200_0000) is the variable store: with
+/// `-bios`, Weir runs from RAM and the flash banks are free.
+var base_v: usize = 0;
 pub const SIZE: usize = 0x2000000; // 32 MiB
+
+/// Set the MMIO base from the platform's DTB discovery. Pass 0 to mark CFI flash
+/// absent (the default), which makes init() report false without any access.
+pub fn setBase(base: usize) void {
+    base_v = base;
+}
 
 // Intel CFI command-set opcodes (written at bank width).
 const CMD_READ_ARRAY: u32 = 0xff;
@@ -34,7 +44,7 @@ var block_size: usize = 0x40000; // 256 KiB, refined from the CFI query
 var present = false;
 
 fn reg(off: usize) *volatile u32 {
-    return @ptrFromInt(BASE + off);
+    return @ptrFromInt(base_v + off);
 }
 
 fn poll() bool {
@@ -50,6 +60,7 @@ fn poll() bool {
 
 /// Probe the bank for a CFI 'QRY' signature and read the erase-block size.
 pub fn init() bool {
+    if (base_v == 0) return false; // no CFI flash on this platform: do not poke MMIO
     reg(0x55 * 4).* = CMD_CFI_QUERY; // CFI query address is 0x55 (word units)
     const q0: u8 = @truncate(reg(0x10 * 4).*);
     const q1: u8 = @truncate(reg(0x11 * 4).*);
@@ -65,7 +76,7 @@ pub fn init() bool {
     if (blocks_x256 != 0) block_size = blocks_x256 * 256;
     reg(0).* = CMD_READ_ARRAY;
     present = true;
-    console.printf("[flash] cfi NOR @ {x}, {d} MiB, {d} KiB blocks\n", .{ BASE, SIZE >> 20, block_size >> 10 });
+    console.printf("[flash] cfi NOR @ {x}, {d} MiB, {d} KiB blocks\n", .{ base_v, SIZE >> 20, block_size >> 10 });
     return true;
 }
 
@@ -79,7 +90,7 @@ pub fn blockSize() usize {
 
 /// Read `buf.len` bytes from flash offset `off` (plain memory-mapped read).
 pub fn read(off: usize, buf: []u8) void {
-    const src: [*]const u8 = @ptrFromInt(BASE + off);
+    const src: [*]const u8 = @ptrFromInt(base_v + off);
     @memcpy(buf, src[0..buf.len]);
 }
 

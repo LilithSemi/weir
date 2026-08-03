@@ -6,6 +6,7 @@
 
 const csr = @import("csr.zig");
 const cpu = @import("cpu.zig");
+const clint = @import("clint.zig");
 const sbi = @import("../../sbi/sbi.zig");
 const ipi = @import("../../sbi/ipi.zig");
 const console = @import("../../console/console.zig");
@@ -16,9 +17,14 @@ pub const TrapFrame = extern struct {
 };
 
 // mcause exception codes.
+const CAUSE_ILLEGAL_INSTRUCTION = 2;
 const CAUSE_ECALL_U = 8;
 const CAUSE_ECALL_S = 9;
 const CAUSE_ECALL_M = 11;
+
+// The `time` counter CSR (0xC01). On a core that omits it, an S-mode `rdtime`
+// traps here as illegal and we serve it from the CLINT machine timer.
+const CSR_TIME = 0xc01;
 
 // mcause interrupt codes (top bit set).
 const IRQ_M_SOFT = 3;
@@ -142,7 +148,66 @@ export fn trapHandler(frame: *TrapFrame) callconv(.c) void {
         return;
     }
 
+    // Illegal instruction from a lower privilege. This is delegated to S-mode on
+    // a core that has the counter CSRs (mode.zig), so we only get here when the
+    // core omits them: emulate a `time` read (rdtime) from the CLINT, and hand
+    // anything else back to the supervisor as if it had been delegated.
+    if (code == CAUSE_ILLEGAL_INSTRUCTION) {
+        if (emulateTimeRead(frame)) return;
+        redirectToSupervisor();
+        return;
+    }
+
     reportFatal(mcause);
+}
+
+/// Serve an S/U-mode read of the `time` counter that trapped because the core
+/// omits the CSR. Returns false for any instruction that is not a `time` CSR
+/// read, so the caller redirects it to the supervisor unchanged.
+fn emulateTimeRead(frame: *TrapFrame) bool {
+    // The payload runs paging-off (Bare), so mepc is a physical address the
+    // M-mode handler can read directly. mepc is only 2-byte aligned (the trapped
+    // csrr can follow a compressed op), and this core faults a misaligned 4-byte
+    // load, so read the 4-byte instruction as two aligned halfwords.
+    const mepc = csr.read("mepc");
+    const lo = @as(*const u16, @ptrFromInt(mepc)).*;
+    const hi = @as(*const u16, @ptrFromInt(mepc + 2)).*;
+    const instr = @as(u32, lo) | (@as(u32, hi) << 16);
+    if (instr & 0x7f != 0x73) return false; // not the SYSTEM opcode
+    const funct3 = (instr >> 12) & 0x7;
+    if (funct3 == 0 or funct3 == 4) return false; // ecall/ebreak, not a CSR op
+    if ((instr >> 20) & 0xfff != CSR_TIME) return false;
+    const rd = (instr >> 7) & 0x1f;
+    if (rd != 0) frame.x[rd] = clint.time();
+    csr.write("mepc", mepc + 4);
+    return true;
+}
+
+/// Redirect the current M-mode trap into S-mode, mimicking hardware delegation,
+/// so the supervisor's own handler services illegal instructions we do not
+/// emulate exactly as it would have with medeleg's illegal-instruction bit set.
+fn redirectToSupervisor() void {
+    const SR_SIE: usize = 1 << 1;
+    const SR_SPIE: usize = 1 << 5;
+    const SR_SPP: usize = 1 << 8;
+    const MPP_MASK: usize = 0x3 << 11;
+    const MPP_S: usize = 0x1 << 11;
+
+    csr.write("scause", csr.read("mcause"));
+    csr.write("sepc", csr.read("mepc"));
+    csr.write("stval", csr.read("mtval"));
+
+    var ms = csr.read("mstatus");
+    const sie_set = (ms & SR_SIE) != 0;
+    const from_supervisor = ((ms & MPP_MASK) >> 11) == 1;
+    ms &= ~(SR_SPIE | SR_SIE | SR_SPP | MPP_MASK);
+    if (sie_set) ms |= SR_SPIE; // SPIE <- SIE
+    if (from_supervisor) ms |= SR_SPP; // SPP <- interrupted privilege (S vs U)
+    ms |= MPP_S; // MPP <- S so the trailing mret drops into S-mode
+    csr.write("mstatus", ms);
+
+    // Enter the supervisor trap vector base; exceptions ignore vectored mode.
+    csr.write("mepc", csr.read("stvec") & ~@as(usize, 0x3));
 }
 
 fn reportFatal(mcause: usize) noreturn {

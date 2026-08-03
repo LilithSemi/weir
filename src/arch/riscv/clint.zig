@@ -9,6 +9,12 @@ fn dev() conduit.driver.clint.Clint {
     return conduit.driver.clint.bind(conduit.Mmio.direct(platform.clintBase()));
 }
 
+/// True once M-mode confirms the Sstc extension is usable (menvcfg.STCE stuck on
+/// readback). When false, set_timer must arm the machine timer through the CLINT
+/// and let the M-mode timer IRQ relay to S-mode as STIP - the path a minimal
+/// core without Sstc (e.g. creek) needs. Set once during mode.enter().
+pub var sstc: bool = false;
+
 /// Current value of the global timer.
 pub fn time() u64 {
     return dev().time();

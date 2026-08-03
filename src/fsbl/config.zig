@@ -1,8 +1,8 @@
 //! FSBL configuration. Hardware addresses come from the `soc` module at
-//! comptime; only the flash layout (where the main image sits) is a build
-//! option, so one source targets different SoC families via -Ddtb.
+//! comptime; the flash layout (where the main image sits) comes from the
+//! `river-firmware` device-tree partition, so one source targets different SoC
+//! families via -Ddtb with no build flags.
 
-const options = @import("fsbl_options");
 const soc = @import("soc");
 
 /// UART base for early FSBL logging (no DTB parsed at runtime yet at this stage).
@@ -25,8 +25,18 @@ pub const tpm_base: usize = soc.tpm_base;
 /// DDR read-training control window (0 = the controller needs no CPU training).
 pub const ddr_train_base: usize = soc.ddr_train_base;
 
-/// Offset of the main Weir image within flash (layout policy, not hardware).
-pub const main_offset: usize = options.main_offset;
+/// Offset + max size of the main Weir image within flash, from the
+/// `river-firmware` device-tree partition. tools/fdt_ld.zig lowers the
+/// partition's reg into these absolute linker symbols, so the symbol VALUE is
+/// the offset/size and it is read via the symbol's address (same trick as
+/// _data_lma in start.zig). No build flag.
+extern const _fsbl_main_offset: u8;
+extern const _fsbl_main_max: u8;
 
-/// Upper bound on the main image size to copy out of flash.
-pub const main_max: usize = options.main_max;
+pub inline fn mainOffset() usize {
+    return @intFromPtr(&_fsbl_main_offset);
+}
+
+pub inline fn mainMax() usize {
+    return @intFromPtr(&_fsbl_main_max);
+}

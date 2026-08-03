@@ -6,20 +6,29 @@
 const std = @import("std");
 
 // QEMU virt places the fw-cfg-mmio device here (DTB node fw-cfg@10100000,
-// reg = <0x10100000 0x18>, compatible "qemu,fw-cfg-mmio").
-const BASE: usize = 0x10100000;
+// reg = <0x10100000 0x18>, compatible "qemu,fw-cfg-mmio"). The base is set from
+// the DTB at discovery; 0 means no fw-cfg device exists on this platform (e.g.
+// a real River SoC). Probing a hardcoded address blind faults on a bus with no
+// device mapped there, so every entry point guards on base != 0.
+var base_v: usize = 0;
 const REG_DATA: usize = 0x00; // selected item streams out a byte at a time
 const REG_SELECTOR: usize = 0x08; // 16-bit, big-endian
 
 const SELECTOR_SIGNATURE: u16 = 0x0000; // reads "QEMU"
 const SELECTOR_FILE_DIR: u16 = 0x0019;
 
+/// Set the MMIO base from the platform's DTB discovery. Pass 0 to mark fw-cfg
+/// absent (the default), which makes present() report false without any access.
+pub fn setBase(base: usize) void {
+    base_v = base;
+}
+
 fn selectorReg() *volatile u16 {
-    return @ptrFromInt(BASE + REG_SELECTOR);
+    return @ptrFromInt(base_v + REG_SELECTOR);
 }
 
 fn dataReg() *volatile u8 {
-    return @ptrFromInt(BASE + REG_DATA);
+    return @ptrFromInt(base_v + REG_DATA);
 }
 
 /// Select an item; this also resets its read offset to zero.
@@ -49,6 +58,7 @@ pub const File = struct { selector: u16, size: u32 };
 /// Is a fw_cfg device present? Confirms by reading the "QEMU" signature, which
 /// also validates our selector-register endianness.
 pub fn present() bool {
+    if (base_v == 0) return false; // no fw-cfg on this platform: do not poke MMIO
     select(SELECTOR_SIGNATURE);
     var sig: [4]u8 = undefined;
     readBytes(&sig);

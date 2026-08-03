@@ -11,6 +11,7 @@ const almanac = @import("conduit").almanac;
 const fwcfg = @import("../fwcfg/fwcfg.zig");
 const console = @import("../console/console.zig");
 const mem = @import("../mem.zig");
+const platform = @import("../platform.zig");
 
 // Marked EfiACPIReclaimMemory in the EFI map so the OS maps then reclaims the
 // tables. Sits below the page pool (see mem.zig), clear of the loaded PE.
@@ -61,6 +62,7 @@ const ENTRY_SIZE = 128;
 /// null if fw_cfg or the ACPI files are absent (e.g. QEMU started without ACPI).
 pub fn loadTables() ?usize {
     if (rsdp_addr != 0) return rsdp_addr; // idempotent
+    fwcfg.setBase(platform.fwcfgBase()); // 0 on a real River SoC: present()==false
     if (!fwcfg.present()) return null;
 
     const loader_file = fwcfg.find("etc/table-loader") orelse return null;

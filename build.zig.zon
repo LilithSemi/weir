@@ -5,8 +5,12 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .conduit = .{
-            .url = "git+https://github.com/Midstall/conduit#4dd139b3b4af5f36f8ce34528aeced95503fa9b4",
-            .hash = "conduit-0.1.0-R_mFrHk9AgBvLWcLEB7dcpdh2TTIxq4mh7OX6l7u6tpR",
+            .url = "git+https://github.com/Midstall/conduit.git#7093da36ab4c5fd161388026d82b2b56ed47bc33",
+            .hash = "conduit-0.1.0-R_mFrDzUAwCjoYV_ZGQy5AW-P7x4D6AnhlYYjLnqEhDb",
+        },
+        .dtree = .{
+            .url = "git+https://github.com/Midstall/dtree#974e557da3c6426eaf2b3284c26ff8740163d954",
+            .hash = "dtree-0.1.0-76to8JyYAABD4L0wHIrSVlX-2X-5f72L7Odt0PvXrJeu",
         },
     },
     .paths = .{""},

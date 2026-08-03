@@ -75,7 +75,19 @@ pub fn dispatch(eid: usize, fid: usize, args: [6]usize) Ret {
 fn time(fid: usize, args: [6]usize) Ret {
     return switch (fid) {
         0 => {
-            csr.write("stimecmp", args[0]);
+            if (clint.sstc) {
+                // Sstc: arm the S-mode timer directly. A future stimecmp also
+                // clears a pending STIP.
+                csr.write("stimecmp", args[0]);
+            } else {
+                // No Sstc (minimal core, e.g. creek): program the machine timer
+                // through the CLINT and re-arm MTIE. The M-mode timer IRQ handler
+                // (trap.zig) relays the machine timer to S-mode as STIP. Clear a
+                // stale STIP first since this is a fresh event.
+                clint.setTimecmp(csr.read("mhartid"), args[0]);
+                csr.clear("mip", MIP_STIP);
+                csr.set("mie", MIE_MTIE);
+            }
             return .{};
         },
         else => .{ .err = SBI_ERR_NOT_SUPPORTED },

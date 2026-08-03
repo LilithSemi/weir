@@ -46,9 +46,20 @@ export fn _start() linksection(".text.boot") callconv(.naked) noreturn {
 export fn weirBoot(hartid: usize, dtb: usize) callconv(.c) noreturn {
     if (hartid == BOOT_HART) {
         // Zero .bss before anyone reads it, then publish the hart table.
+        // Clear with 32-bit (sw) stores rather than a byte @memset: word-width
+        // DRAM writes are far faster through the CDC/downsizer than the
+        // byte-by-byte `sb` loop ReleaseSmall's @memset emits. Large uninitialised
+        // buffers (S-mode stacks) live in .noinit, OUT of [__bss_start,__bss_end],
+        // so this loop stays small: zeroing 8 MiB here cost ~55s on the slow core.
         const start = @intFromPtr(&__bss_start);
         const end = @intFromPtr(&__bss_end);
-        @memset(@as([*]u8, @ptrFromInt(start))[0 .. end - start], 0);
+        var p: usize = start;
+        while (p + 4 <= end) : (p += 4) {
+            @as(*volatile u32, @ptrFromInt(p)).* = 0;
+        }
+        while (p < end) : (p += 1) {
+            @as(*volatile u8, @ptrFromInt(p)).* = 0;
+        }
         hsm.init(BOOT_HART);
         @atomicStore(u32, &global_ready, 1, .release);
     } else {

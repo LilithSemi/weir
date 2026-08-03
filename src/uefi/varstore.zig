@@ -13,6 +13,7 @@
 const std = @import("std");
 const cfi = @import("../flash/cfi.zig");
 const console = @import("../console/console.zig");
+const platform = @import("../platform.zig");
 
 const MAGIC: u32 = 0x31535657; // "WVS1"
 const STATE_VALID: u32 = 0x00000001;
@@ -69,6 +70,7 @@ fn freeSlot() ?*Var {
 /// Load the store from flash into the RAM cache.
 pub fn init() void {
     for (&vars) |*v| v.used = false;
+    cfi.setBase(platform.cfiFlashBase()); // 0 on a real River SoC: init()==false
     if (!cfi.init()) {
         console.writeStr("[var] no flash; variables are unavailable\n");
         loaded = false;
