@@ -2,7 +2,7 @@
 //!
 //! QEMU's `virt` machine exposes two cfi-flash banks (pflash_cfi01) at
 //! 0x2000_0000 and 0x2200_0000, each 32 MiB, bank-width 4. Reads are plain
-//! memory accesses; erase and program go through the Intel command set with
+//! memory accesses. Erase and program go through the Intel command set with
 //! status polling. Weir uses one bank as a non-volatile EFI variable store.
 //!
 //! Attach a backing file with:
@@ -29,7 +29,6 @@ pub fn setBase(base: usize) void {
 // Intel CFI command-set opcodes (written at bank width).
 const CMD_READ_ARRAY: u32 = 0xff;
 const CMD_READ_STATUS: u32 = 0x70;
-const CMD_CLEAR_STATUS: u32 = 0x50;
 const CMD_ERASE_SETUP: u32 = 0x20;
 const CMD_ERASE_CONFIRM: u32 = 0xd0;
 const CMD_PROGRAM: u32 = 0x40;
@@ -76,7 +75,10 @@ pub fn init() bool {
     if (blocks_x256 != 0) block_size = blocks_x256 * 256;
     reg(0).* = CMD_READ_ARRAY;
     present = true;
-    console.printf("[flash] cfi NOR @ {x}, {d} MiB, {d} KiB blocks\n", .{ base_v, SIZE >> 20, block_size >> 10 });
+    console.out.print(
+        "[flash] cfi NOR @ {x}, {d} MiB, {d} KiB blocks\n",
+        .{ base_v, SIZE >> 20, block_size >> 10 },
+    ) catch {};
     return true;
 }
 

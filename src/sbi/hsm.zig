@@ -1,8 +1,8 @@
 //! SBI Hart State Management (HSM): start, stop, and query secondary harts.
 //!
 //! Secondary harts park in `wait` (M-mode, STOPPED). `hartStart` records an
-//! entry point, flips the target to START_PENDING, and pokes it with a CLINT
-//! IPI; the woken hart drops into S-mode at that entry.
+//! entry point, sets the target to START_PENDING, and sends it a CLINT IPI.
+//! The woken hart drops into S-mode at that entry.
 
 const csr = @import("../arch/riscv/csr.zig");
 const clint = @import("../arch/riscv/clint.zig");
@@ -15,7 +15,6 @@ pub const MAX_HARTS = 8;
 const STARTED: u32 = 0;
 const STOPPED: u32 = 1;
 const START_PENDING: u32 = 2;
-const STOP_PENDING: u32 = 3;
 
 // SBI error codes.
 const ERR_FAILED: usize = errCode(-1);
@@ -56,7 +55,14 @@ pub fn hartStart(target: usize, start_addr: usize, opaque_arg: usize) usize {
 
     // Claim the hart: only a STOPPED hart can be started. The seq_cst exchange
     // publishes start_addr/opaque_arg to the target's acquire load.
-    const prev = @cmpxchgStrong(u32, &harts[target].state, STOPPED, START_PENDING, .seq_cst, .seq_cst);
+    const prev = @cmpxchgStrong(
+        u32,
+        &harts[target].state,
+        STOPPED,
+        START_PENDING,
+        .seq_cst,
+        .seq_cst,
+    );
     if (prev) |s| {
         return if (s == STARTED) ERR_ALREADY_AVAILABLE else ERR_FAILED;
     }
@@ -78,15 +84,15 @@ pub fn hartStatus(target: usize) ?usize {
     return @atomicLoad(u32, &harts[target].state, .acquire);
 }
 
-/// M-mode parking loop for a stopped hart. Wakes on a CLINT IPI; once started,
-/// drops into S-mode at the requested entry. Never returns.
+/// M-mode parking loop for a stopped hart. It wakes on a CLINT IPI. Once
+/// started, it drops into S-mode at the requested entry. Never returns.
 pub fn wait(hartid: usize) noreturn {
     csr.set("mie", MIE_MSIE); // let wfi wake on a software interrupt
     while (true) {
         asm volatile ("wfi");
         // Drain the mailbox: a remote fence aimed at this stopped hart runs as
         // a no-op here but must clear so the sender's sync wait completes.
-        _ = ipi.service(hartid);
+        _ = ipi.service(hartid); // zippy:ignore discarded_error -- stopped hart has no S-mode relay
         if (@atomicLoad(u32, &harts[hartid].state, .acquire) == START_PENDING) {
             const addr = harts[hartid].start_addr;
             const arg = harts[hartid].opaque_arg;

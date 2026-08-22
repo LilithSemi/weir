@@ -10,7 +10,6 @@ const uefi = std.os.uefi;
 const handledb = @import("handledb.zig");
 
 const Status = uefi.Status;
-const ok = @intFromEnum(Status.success);
 
 // LINUX_EFI_INITRD_MEDIA_GUID 5568e427-68fc-4f3d-ac74-ca555231cc68
 pub const INITRD_MEDIA_GUID = uefi.Guid{
@@ -43,22 +42,39 @@ pub const DEVICE_PATH_GUID = uefi.Guid{
 };
 
 const LoadFile2 = extern struct {
-    load_file: *const fn (*LoadFile2, *const anyopaque, bool, *usize, ?*anyopaque) callconv(.c) Status,
+    load_file: *const fn (
+        *LoadFile2,
+        *const anyopaque,
+        bool,
+        *usize,
+        ?*anyopaque,
+    ) callconv(.c) Status,
 };
 
 // Device path: Media(0x04)/Vendor(0x03) carrying INITRD_MEDIA_GUID, then End.
 var device_path = [_]u8{
     0x04, 0x03, 0x14, 0x00, // Media, Vendor, length 20
-    0x27, 0xe4, 0x68, 0x55, 0xfc, 0x68, 0x3d, 0x4f, 0xac, 0x74, 0xca, 0x55, 0x52, 0x31, 0xcc, 0x68, // GUID
+    // INITRD_MEDIA_GUID, little-endian mixed form.
+    0x27, 0xe4, 0x68, 0x55,
+    0xfc, 0x68, 0x3d, 0x4f,
+    0xac, 0x74, 0xca, 0x55,
+    0x52, 0x31, 0xcc, 0x68,
     0x7f, 0xff, 0x04, 0x00, // End of device path
 };
 const VENDOR_NODE_LEN = 20;
 
-var lf2: LoadFile2 = undefined;
+// install() writes lf2 before the app can reach it.
+var lf2: LoadFile2 = undefined; // zippy:ignore unsafe_undefined
 var data: []const u8 = &[_]u8{};
 var handle: ?*handledb.Handle = null;
 
-fn loadFile(self: *LoadFile2, fp: *const anyopaque, boot_policy: bool, buffer_size: *usize, buffer: ?*anyopaque) callconv(.c) Status {
+fn loadFile(
+    self: *LoadFile2,
+    fp: *const anyopaque,
+    boot_policy: bool,
+    buffer_size: *usize,
+    buffer: ?*anyopaque,
+) callconv(.c) Status {
     _ = self;
     _ = fp;
     _ = boot_policy;
@@ -71,13 +87,18 @@ fn loadFile(self: *LoadFile2, fp: *const anyopaque, boot_policy: bool, buffer_si
     return Status.success;
 }
 
+// The handle DB has room during setup, so install never returns null here.
+fn addProtocol(h: *handledb.Handle, guid: *const uefi.Guid, iface: *anyopaque) void {
+    _ = handledb.install(h, guid, iface); // zippy:ignore discarded_error
+}
+
 /// Install the initrd handle (Device Path + LoadFile2) so the stub finds it.
 pub fn install(initrd: []const u8) void {
     data = initrd;
     lf2 = .{ .load_file = @ptrFromInt(@intFromPtr(&loadFile)) };
     const h = handledb.create() orelse return;
-    _ = handledb.install(h, &DEVICE_PATH_GUID, @ptrCast(&device_path));
-    _ = handledb.install(h, &LOAD_FILE2_GUID, @ptrCast(&lf2));
+    addProtocol(h, &DEVICE_PATH_GUID, @ptrCast(&device_path));
+    addProtocol(h, &LOAD_FILE2_GUID, @ptrCast(&lf2));
     handle = h;
 }
 

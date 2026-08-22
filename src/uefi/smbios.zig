@@ -88,7 +88,7 @@ pub fn build(ram_bytes: u64) void {
     put8(2); // BIOS Version -> "Weir 0.1"
     put16(0); // BIOS starting address segment (n/a)
     put8(3); // BIOS Release Date -> string
-    put8(0); // BIOS ROM size (64 KiB * (n+1)); 0 = 64 KiB
+    put8(0); // BIOS ROM size in 64 KiB units of (n+1). 0 means 64 KiB
     put64(1 << 3); // Characteristics: bit 3 = BIOS Characteristics Not Supported
     put16(0); // characteristics extension bytes 1-2
     put8(VERSION_MAJOR); // System BIOS major release
@@ -104,7 +104,10 @@ pub fn build(ram_bytes: u64) void {
     put8(3); // Version
     put8(4); // Serial Number
     // UUID: a fixed, recognizable value for our virtual board.
-    const uuid = [16]u8{ 0x57, 0x65, 0x69, 0x72, 0x00, 0x01, 0x40, 0x00, 0x80, 0x00, 0x52, 0x69, 0x76, 0x65, 0x72, 0x00 };
+    const uuid = [16]u8{
+        0x57, 0x65, 0x69, 0x72, 0x00, 0x01, 0x40, 0x00,
+        0x80, 0x00, 0x52, 0x69, 0x76, 0x65, 0x72, 0x00,
+    };
     @memcpy(table[cur..][0..16], &uuid);
     cur += 16;
     put8(0x06); // Wake-up Type: Power Switch

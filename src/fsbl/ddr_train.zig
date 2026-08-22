@@ -28,7 +28,6 @@
 //! count of N with N repeated APPLY pulses.
 
 const std = @import("std");
-const uart = @import("uart");
 const conduit = @import("conduit");
 const fsbl_options = @import("fsbl_options");
 
@@ -104,7 +103,7 @@ pub const TrainDesc = struct {
     train_base: u64 = 0,
     stride: u32 = 8,
     lanes: u32 = 0,
-    knobs: [MAX_KNOBS]Knob = undefined,
+    knobs: [MAX_KNOBS]Knob = [_]Knob{.{}} ** MAX_KNOBS,
     knob_count: usize = 0,
     rows: u32 = 0,
     cols: u32 = 0,
@@ -260,11 +259,11 @@ pub fn parseTrainingNode(dtb: []const u8) ?TrainDesc {
 
 // === Register access ===================================================
 
-fn r32(addr: usize) u32 {
-    return @as(*volatile u32, @ptrFromInt(addr)).*;
-}
-fn w32(addr: usize, v: u32) void {
-    @as(*volatile u32, @ptrFromInt(addr)).* = v;
+/// Do a dummy read so the write-to-read turnaround settles before the next real
+/// read. The volatile access is the delay, so the value goes nowhere.
+fn warmRead(addr: usize) void {
+    // zippy:ignore discarded_error -- dummy read, the volatile access is the delay
+    _ = @as(*volatile u32, @ptrFromInt(addr)).*;
 }
 
 /// The MMIO address of a control-block register at the given index.
@@ -278,7 +277,8 @@ fn ctlAddr(d: *const TrainDesc, index: u32) usize {
 fn waitNotBusy(d: *const TrainDesc) bool {
     var i: usize = 0;
     while (i < POLL_LIMIT) : (i += 1) {
-        if (r32(ctlAddr(d, STATUS_INDEX)) & STATUS_BUSY == 0) return true;
+        const status = @as(*volatile u32, @ptrFromInt(ctlAddr(d, STATUS_INDEX))).*;
+        if (status & STATUS_BUSY == 0) return true;
     }
     return false;
 }
@@ -287,10 +287,12 @@ fn waitNotBusy(d: *const TrainDesc) bool {
 /// APPLY, then wait for BUSY to clear.
 fn applyKnob(d: *const TrainDesc, knob: *const Knob, lane: u32, value: u32) void {
     const lane_sel = (lane & 0xF) << CTL_LANE_SHIFT;
-    w32(@intCast(d.train_base + knob.reg), value);
-    w32(ctlAddr(d, CTL_INDEX), CTL_SET | lane_sel);
-    w32(ctlAddr(d, CTL_INDEX), CTL_APPLY | lane_sel);
-    _ = waitNotBusy(d);
+    @as(*volatile u32, @ptrFromInt(@as(usize, @intCast(d.train_base + knob.reg)))).* = value;
+    @as(*volatile u32, @ptrFromInt(ctlAddr(d, CTL_INDEX))).* = CTL_SET | lane_sel;
+    @as(*volatile u32, @ptrFromInt(ctlAddr(d, CTL_INDEX))).* = CTL_APPLY | lane_sel;
+    // A busy-timeout is bounded by POLL_LIMIT and shows up later as a failed
+    // pattern check, so a dropped result here cannot hang the boot.
+    _ = waitNotBusy(d); // zippy:ignore discarded_error -- the fault shows in the pattern check
 }
 
 // === Pattern feedback ==================================================
@@ -336,13 +338,14 @@ fn patternPasses(dram_base: usize, mask: u32) bool {
         0xC0DE_1234, 0xC0DE_8001, 0xC0DE_0F0F, 0xC0DE_F0F0,
     };
     var i: usize = 0;
-    while (i < PATTERN_WORDS) : (i += 1) w32(scratch + i * 4, pats[i]);
-    // A warm-up read absorbs the write-to-read turnaround so the first compared
-    // word is not the turnaround bubble.
-    _ = r32(scratch);
+    while (i < PATTERN_WORDS) : (i += 1) {
+        @as(*volatile u32, @ptrFromInt(scratch + i * 4)).* = pats[i];
+    }
+    warmRead(scratch);
     i = 0;
     while (i < PATTERN_WORDS) : (i += 1) {
-        if ((r32(scratch + i * 4) & mask) != (pats[i] & mask)) return false;
+        const got = @as(*volatile u32, @ptrFromInt(scratch + i * 4)).*;
+        if ((got & mask) != (pats[i] & mask)) return false;
     }
     return true;
 }
@@ -353,6 +356,16 @@ fn patternPasses(dram_base: usize, mask: u32) bool {
 const SweepResult = struct {
     found: bool,
     center: u32,
+};
+
+/// The inputs one slice sweep needs. Both sweep engines take the same set.
+const SweepArgs = struct {
+    con: *std.Io.Writer,
+    d: *const TrainDesc,
+    knob: *const Knob,
+    lane: u32,
+    slice: u32,
+    dram_base: usize,
 };
 
 /// Find the centre of the widest run of set bits in `pass[min..=max]`.
@@ -382,28 +395,21 @@ fn widestCenter(pass: []const bool, min: u32, max: u32) SweepResult {
 /// Sweep one slice of an absolute-value knob. Each tap writes an absolute value,
 /// so the engine can set any tap directly. Return the centre of the widest passing
 /// window.
-fn sweepAbsolute(
-    con: *uart.Ns16550a,
-    d: *const TrainDesc,
-    knob: *const Knob,
-    lane: u32,
-    slice: u32,
-    dram_base: usize,
-) SweepResult {
+fn sweepAbsolute(a: SweepArgs) SweepResult {
     var pass = [_]bool{false} ** 33; // taps 0..31 plus a guard slot
-    const mask = sliceMask(d, knob, slice);
-    var tap = knob.min;
+    const mask = sliceMask(a.d, a.knob, a.slice);
+    var tap = a.knob.min;
     var pass_count: u32 = 0;
-    while (tap <= knob.max) : (tap += 1) {
-        applyKnob(d, knob, lane, tap);
-        const ok = patternPasses(dram_base, mask);
+    while (tap <= a.knob.max) : (tap += 1) {
+        applyKnob(a.d, a.knob, a.lane, tap);
+        const ok = patternPasses(a.dram_base, mask);
         if (tap < pass.len) pass[tap] = ok;
         if (ok) pass_count += 1;
-        if (tap == knob.max) break;
+        if (tap == a.knob.max) break;
     }
-    logSlice(con, knob, slice, pass_count);
-    const res = widestCenter(pass[0..], knob.min, @min(knob.max, @as(u32, pass.len - 1)));
-    if (res.found) applyKnob(d, knob, lane, res.center);
+    logSlice(a.con, a.knob, a.slice, pass_count);
+    const res = widestCenter(pass[0..], a.knob.min, @min(a.knob.max, @as(u32, pass.len - 1)));
+    if (res.found) applyKnob(a.d, a.knob, a.lane, res.center);
     return res;
 }
 
@@ -416,60 +422,40 @@ fn advanceOne(d: *const TrainDesc, knob: *const Knob, lane: u32) void {
 /// Sweep one slice of a 1-bit-level knob (BITSLIP). The level cannot be set to an
 /// absolute count, so the engine steps it forward and checks each count. The count
 /// range wraps at max+1. The sweep assumes the level starts at 0.
-fn sweepAdvance(
-    con: *uart.Ns16550a,
-    d: *const TrainDesc,
-    knob: *const Knob,
-    lane: u32,
-    slice: u32,
-    dram_base: usize,
-) SweepResult {
+fn sweepAdvance(a: SweepArgs) SweepResult {
     var pass = [_]bool{false} ** 9; // counts 0..7 plus a guard slot
-    const mask = sliceMask(d, knob, slice);
-    const span = knob.max + 1; // the wrap period, e.g. 8 for a 3-bit slip
+    const mask = sliceMask(a.d, a.knob, a.slice);
+    const span = a.knob.max + 1; // the wrap period, e.g. 8 for a 3-bit slip
     var pass_count: u32 = 0;
     var count: u32 = 0;
-    while (count <= knob.max) : (count += 1) {
-        const ok = patternPasses(dram_base, mask);
+    while (count <= a.knob.max) : (count += 1) {
+        const ok = patternPasses(a.dram_base, mask);
         if (count < pass.len) pass[count] = ok;
         if (ok) pass_count += 1;
-        advanceOne(d, knob, lane); // step to the next count
-        if (count == knob.max) break;
+        advanceOne(a.d, a.knob, a.lane);
+        if (count == a.knob.max) break;
     }
     // The sweep issued max+1 pulses, so the level wrapped back to 0.
-    logSlice(con, knob, slice, pass_count);
-    const res = widestCenter(pass[0..], knob.min, @min(knob.max, @as(u32, pass.len - 1)));
+    logSlice(a.con, a.knob, a.slice, pass_count);
+    const res = widestCenter(pass[0..], a.knob.min, @min(a.knob.max, @as(u32, pass.len - 1)));
     if (res.found) {
         // Step from 0 to the chosen centre.
         var i: u32 = 0;
-        while (i < res.center % span) : (i += 1) advanceOne(d, knob, lane);
+        while (i < res.center % span) : (i += 1) advanceOne(a.d, a.knob, a.lane);
     }
     return res;
 }
 
 // === Logging ===========================================================
 
-fn hexNibble(con: *uart.Ns16550a, n: u8) void {
-    const digits = "0123456789ABCDEF";
-    con.putc(digits[n & 0xF]);
-}
-
-fn hex32(con: *uart.Ns16550a, v: u32) void {
-    var i: usize = 8;
-    while (i > 0) {
-        i -= 1;
-        hexNibble(con, @intCast((v >> @intCast(i * 4)) & 0xF));
-    }
-}
-
-fn logSlice(con: *uart.Ns16550a, knob: *const Knob, slice: u32, pass_count: u32) void {
-    con.writeStr("[fsbl] train: knob=");
-    con.writeStr(knob.name());
-    con.writeStr(" slice=");
-    hexNibble(con, @intCast(slice & 0xF));
-    con.writeStr(" passes=0x");
-    hex32(con, pass_count);
-    con.putc('\n');
+fn logSlice(con: *std.Io.Writer, knob: *const Knob, slice: u32, pass_count: u32) void {
+    con.writeAll("[fsbl] train: knob=") catch {};
+    con.writeAll(knob.name()) catch {};
+    con.writeAll(" slice=") catch {};
+    con.print("{X}", .{@intCast(slice & 0xF)}) catch {};
+    con.writeAll(" passes=0x") catch {};
+    con.print("{X:0>8}", .{pass_count}) catch {};
+    con.writeByte('\n') catch {};
 }
 
 /// How many slices a knob covers, given its scope and the lane count.
@@ -495,21 +481,21 @@ fn sliceLane(knob: *const Knob, slice: u32) u32 {
 /// widest passing window. Finish with the shared memtest. Return true when every
 /// knob centres and the memtest passes.
 pub fn trainController(
-    con: *uart.Ns16550a,
+    con: *std.Io.Writer,
     d: *const TrainDesc,
     dram_base: usize,
-    memtest: *const fn (*uart.Ns16550a) bool,
+    memtest: *const fn (*std.Io.Writer) bool,
 ) bool {
-    const cap = r32(ctlAddr(d, CAP_INDEX));
-    con.writeStr("[fsbl] train: window base=0x");
-    hex32(con, @intCast(d.train_base & 0xFFFF_FFFF));
-    con.writeStr(" lanes=");
-    hexNibble(con, @intCast(d.lanes & 0xF));
-    con.writeStr(" knobs=");
-    hexNibble(con, @intCast(d.knob_count & 0xF));
-    con.writeStr(" cap=0x");
-    hex32(con, cap);
-    con.putc('\n');
+    const cap = @as(*volatile u32, @ptrFromInt(ctlAddr(d, CAP_INDEX))).*;
+    con.writeAll("[fsbl] train: window base=0x") catch {};
+    con.print("{X:0>8}", .{@intCast(d.train_base & 0xFFFF_FFFF)}) catch {};
+    con.writeAll(" lanes=") catch {};
+    con.print("{X}", .{@intCast(d.lanes & 0xF)}) catch {};
+    con.writeAll(" knobs=") catch {};
+    con.print("{X}", .{@intCast(d.knob_count & 0xF)}) catch {};
+    con.writeAll(" cap=0x") catch {};
+    con.print("{X:0>8}", .{cap}) catch {};
+    con.writeByte('\n') catch {};
 
     var ki: usize = 0;
     while (ki < d.knob_count) : (ki += 1) {
@@ -518,38 +504,46 @@ pub fn trainController(
             // The controller has no clean write-leveling result signal yet, so the
             // STATUS map is a placeholder. Skip the map read for this first cut and
             // leave write-leveling at its hardware default.
-            con.writeStr("[fsbl] train: knob=");
-            con.writeStr(knob.name());
-            con.writeStr(" feedback=map placeholder, skipped\n");
+            con.writeAll("[fsbl] train: knob=") catch {};
+            con.writeAll(knob.name()) catch {};
+            con.writeAll(" feedback=map placeholder, skipped\n") catch {};
             continue;
         }
         const slices = sliceCount(d, knob);
         var s: u32 = 0;
         while (s < slices) : (s += 1) {
             const lane = sliceLane(knob, s);
+            const args = SweepArgs{
+                .con = con,
+                .d = d,
+                .knob = knob,
+                .lane = lane,
+                .slice = s,
+                .dram_base = dram_base,
+            };
             const res = if (knob.advance_only)
-                sweepAdvance(con, d, knob, lane, s, dram_base)
+                sweepAdvance(args)
             else
-                sweepAbsolute(con, d, knob, lane, s, dram_base);
+                sweepAbsolute(args);
             if (!res.found) {
-                con.writeStr("[fsbl] train: knob=");
-                con.writeStr(knob.name());
-                con.writeStr(" slice=");
-                hexNibble(con, @intCast(s & 0xF));
-                con.writeStr(" NO PASSING TAP\n");
+                con.writeAll("[fsbl] train: knob=") catch {};
+                con.writeAll(knob.name()) catch {};
+                con.writeAll(" slice=") catch {};
+                con.print("{X}", .{@intCast(s & 0xF)}) catch {};
+                con.writeAll(" NO PASSING TAP\n") catch {};
                 return false;
             }
-            con.writeStr("[fsbl] train: knob=");
-            con.writeStr(knob.name());
-            con.writeStr(" slice=");
-            hexNibble(con, @intCast(s & 0xF));
-            con.writeStr(" centred tap=0x");
-            hex32(con, res.center);
-            con.putc('\n');
+            con.writeAll("[fsbl] train: knob=") catch {};
+            con.writeAll(knob.name()) catch {};
+            con.writeAll(" slice=") catch {};
+            con.print("{X}", .{@intCast(s & 0xF)}) catch {};
+            con.writeAll(" centred tap=0x") catch {};
+            con.print("{X:0>8}", .{res.center}) catch {};
+            con.writeByte('\n') catch {};
         }
     }
 
-    con.writeStr("[fsbl] train: knobs centred, running memtest\n");
+    con.writeAll("[fsbl] train: knobs centred, running memtest\n") catch {};
     return memtest(con);
 }
 

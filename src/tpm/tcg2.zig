@@ -48,7 +48,9 @@ const BootServiceCapability = extern struct {
     active_pcr_banks: u32,
 };
 
-var proto: Protocol = undefined;
+// install() writes every field before any dispatch reads proto. The fields are
+// non-null function pointers, so zero-init would store invalid pointers.
+var proto: Protocol = undefined; // zippy:ignore unsafe_undefined
 
 fn getCapability(_: *Protocol, cap: *BootServiceCapability) callconv(.c) usize {
     cap.size = @sizeOf(BootServiceCapability);
@@ -65,7 +67,13 @@ fn getCapability(_: *Protocol, cap: *BootServiceCapability) callconv(.c) usize {
     return ok;
 }
 
-fn getEventLog(_: *Protocol, format: u32, log_loc: *u64, last_entry: *u64, truncated: *bool) callconv(.c) usize {
+fn getEventLog(
+    _: *Protocol,
+    format: u32,
+    log_loc: *u64,
+    last_entry: *u64,
+    truncated: *bool,
+) callconv(.c) usize {
     if (format != EVENT_LOG_FORMAT_TCG_2) return @intFromEnum(Status.invalid_parameter);
     log_loc.* = tpm.eventLogStart();
     last_entry.* = tpm.eventLogLastEntry();
@@ -78,7 +86,13 @@ fn getEventLog(_: *Protocol, format: u32, log_loc: *u64, last_entry: *u64, trunc
 // at 18.
 const HLEE_EXTEND_ONLY: u64 = 0x0000000000000001;
 
-fn hashLogExtendEvent(_: *Protocol, flags: u64, data: u64, data_len: u64, event: [*]u8) callconv(.c) usize {
+fn hashLogExtendEvent(
+    _: *Protocol,
+    flags: u64,
+    data: u64,
+    data_len: u64,
+    event: [*]u8,
+) callconv(.c) usize {
     if (!tpm.isAvailable()) return @intFromEnum(Status.device_error);
     const size = std.mem.readInt(u32, event[0..4], .little);
     if (size < 18) return @intFromEnum(Status.invalid_parameter);
@@ -87,19 +101,28 @@ fn hashLogExtendEvent(_: *Protocol, flags: u64, data: u64, data_len: u64, event:
     const event_data = event[18..size];
 
     var digest: [tpm2.SHA256_LEN]u8 = undefined;
-    tpm.hash(@as([*]const u8, @ptrFromInt(@as(usize, @intCast(data))))[0..@intCast(data_len)], &digest);
+    const src: [*]const u8 = @ptrFromInt(@as(usize, @intCast(data)));
+    tpm.hash(src[0..@intCast(data_len)], &digest);
 
     const want_log = flags & HLEE_EXTEND_ONLY == 0;
     if (want_log) {
-        if (!tpm.logExtend(pcr, event_type, &digest, event_data)) return @intFromEnum(Status.device_error);
+        if (!tpm.logExtend(pcr, event_type, &digest, event_data))
+            return @intFromEnum(Status.device_error);
     } else {
         if (!tpm.extendOnly(pcr, &digest)) return @intFromEnum(Status.device_error);
     }
     return ok;
 }
 
-fn submitCommand(_: *Protocol, in_size: u32, in_block: [*]u8, out_size: u32, out_block: [*]u8) callconv(.c) usize {
-    if (tpm2.submit(in_block[0..in_size], out_block[0..out_size]) == null) return @intFromEnum(Status.device_error);
+fn submitCommand(
+    _: *Protocol,
+    in_size: u32,
+    in_block: [*]u8,
+    out_size: u32,
+    out_block: [*]u8,
+) callconv(.c) usize {
+    if (tpm2.submit(in_block[0..in_size], out_block[0..out_size]) == null)
+        return @intFromEnum(Status.device_error);
     return ok;
 }
 
@@ -130,5 +153,7 @@ pub fn install() void {
         .setActivePcrBanks = @ptrFromInt(@intFromPtr(&setActivePcrBanks)),
         .getResultOfSetActivePcrBanks = @ptrFromInt(@intFromPtr(&getResultOfSetActivePcrBanks)),
     };
-    _ = handledb.install(null, &TCG2_GUID, @ptrCast(&proto));
+    // install returns the handle it landed on, which the caller does not need.
+    // It only fails when the handle table is full, which cannot happen here.
+    _ = handledb.install(null, &TCG2_GUID, @ptrCast(&proto)); // zippy:ignore discarded_error
 }

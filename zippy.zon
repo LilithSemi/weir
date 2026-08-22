@@ -1,0 +1,12 @@
+.{
+    // The vendored `conduit` dependency ships driver and test files that this
+    // firmware does not compile. `dead_file` reports each one, but that is
+    // conduit's concern in its own tree, not Weir's. Silence it here.
+    .lints = .{
+        .dead_file = .{ .severity = .off },
+        // The console writes through a std.Io.Writer. A firmware console write
+        // has nowhere to report a failure and the UART sink never fails, so call
+        // sites drop the error with `catch {}`. Exempt those writer discards.
+        .suppressed_errors = .{ .exempt_writers = true },
+    },
+}

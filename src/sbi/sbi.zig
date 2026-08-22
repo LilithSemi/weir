@@ -1,8 +1,8 @@
 //! Minimal RISC-V SBI (Supervisor Binary Interface) provider.
 //!
-//! Weir runs in M-mode and answers `ecall`s. Only the handful of functions
-//! needed for early bring-up are wired today; the trap handler routes ecalls
-//! here. This grows toward a full OpenSBI-equivalent as S-mode payloads land.
+//! Weir runs in M-mode and answers `ecall`s. Today it wires only the few
+//! functions needed for early bring-up. The trap handler routes ecalls here.
+//! Weir grows toward a full OpenSBI equivalent as S-mode payloads land.
 
 const console = @import("../console/console.zig");
 const csr = @import("../arch/riscv/csr.zig");
@@ -12,10 +12,9 @@ const hsm = @import("hsm.zig");
 const ipi_mailbox = @import("ipi.zig");
 const platform = @import("../platform.zig");
 
-/// SiFive-style test finisher: writing magic values powers the machine off or
-/// resets it. Its address is discovered from the device tree, not assumed.
+/// SiFive-style test finisher. A write of this magic value powers the machine
+/// off. The device tree gives the finisher address. Weir does not assume it.
 const FINISHER_PASS: u32 = 0x5555;
-const FINISHER_RESET: u32 = 0x7777;
 
 fn finisher() *volatile u32 {
     return @ptrFromInt(platform.resetBase());
@@ -23,6 +22,7 @@ fn finisher() *volatile u32 {
 
 // Extension IDs.
 const EID_LEGACY_PUTCHAR = 0x01;
+const EID_LEGACY_GETCHAR = 0x02;
 const EID_LEGACY_SHUTDOWN = 0x08;
 const EID_BASE = 0x10;
 const EID_TIME = 0x54494D45; // "TIME" timer
@@ -50,28 +50,28 @@ pub const Ret = struct {
     val: usize = 0,
 };
 
-/// Dispatch a single SBI call. `args` holds a0..a5; eid is a7, fid is a6.
+/// Dispatch a single SBI call. `args` holds a0..a5. eid is a7 and fid is a6.
 pub fn dispatch(eid: usize, fid: usize, args: [6]usize) Ret {
     return switch (eid) {
         EID_LEGACY_PUTCHAR => {
-            console.putc(@truncate(args[0]));
+            console.out.writeByte(@truncate(args[0])) catch {};
             return .{};
         },
-        EID_LEGACY_SHUTDOWN => shutdown(),
+        EID_LEGACY_GETCHAR => legacyGetchar(),
+        EID_LEGACY_SHUTDOWN, EID_SRST => shutdown(),
         EID_BASE => base(fid, args),
         EID_TIME => time(fid, args),
         EID_IPI => ipi(fid, args),
         EID_RFENCE => rfence(fid, args),
         EID_HSM => hartStateMgmt(fid, args),
         EID_DBCN => dbcn(fid, args),
-        EID_SRST => shutdown(),
         else => .{ .err = SBI_ERR_NOT_SUPPORTED },
     };
 }
 
 /// TIME extension. set_timer(stime_value) programs the next supervisor timer
-/// event. Weir enables Sstc (menvcfg.STCE), so writing stimecmp directly arms
-/// STIP (a future value also clears a pending STIP); no machine timer relay.
+/// event. Weir enables Sstc (menvcfg.STCE), so a write to stimecmp arms STIP
+/// directly. A future value also clears a pending STIP. No machine timer relay.
 fn time(fid: usize, args: [6]usize) Ret {
     return switch (fid) {
         0 => {
@@ -83,7 +83,7 @@ fn time(fid: usize, args: [6]usize) Ret {
                 // No Sstc (minimal core, e.g. creek): program the machine timer
                 // through the CLINT and re-arm MTIE. The M-mode timer IRQ handler
                 // (trap.zig) relays the machine timer to S-mode as STIP. Clear a
-                // stale STIP first since this is a fresh event.
+                // stale STIP first because this is a fresh event.
                 clint.setTimecmp(csr.read("mhartid"), args[0]);
                 csr.clear("mip", MIP_STIP);
                 csr.set("mie", MIE_MTIE);
@@ -100,7 +100,8 @@ fn hartStateMgmt(fid: usize, args: [6]usize) Ret {
         0 => .{ .err = hsm.hartStart(args[0], args[1], args[2]) },
         1 => hsm.hartStop(), // never returns
         2 => blk: {
-            const state = hsm.hartStatus(args[0]) orelse break :blk .{ .err = SBI_ERR_INVALID_PARAM };
+            const state = hsm.hartStatus(args[0]) orelse
+                break :blk .{ .err = SBI_ERR_INVALID_PARAM };
             break :blk .{ .val = state };
         },
         else => .{ .err = SBI_ERR_NOT_SUPPORTED },
@@ -108,7 +109,7 @@ fn hartStateMgmt(fid: usize, args: [6]usize) Ret {
 }
 
 /// IPI extension. send_ipi(hart_mask, hart_mask_base) queues a supervisor IPI
-/// on each targeted hart; the receiver relays it to S-mode as SSIP.
+/// on each targeted hart. The receiver relays it to S-mode as SSIP.
 fn ipi(fid: usize, args: [6]usize) Ret {
     return switch (fid) {
         0 => {
@@ -123,15 +124,14 @@ fn ipi(fid: usize, args: [6]usize) Ret {
     };
 }
 
-/// RFENCE extension. Each function fans out to the targeted harts, which run
-/// the fence in their machine software handler; the call returns once every
-/// remote hart has completed (synchronous). SFENCE.VMA range/ASID arguments are
-/// honoured conservatively by flushing the whole TLB.
+/// RFENCE extension. Each function fans out to the targeted harts. Every hart
+/// runs the fence in its machine software handler. The call returns after every
+/// remote hart completes (synchronous). Weir handles the SFENCE.VMA range and
+/// ASID arguments conservatively and flushes the whole TLB.
 fn rfence(fid: usize, args: [6]usize) Ret {
     const ops: u32 = switch (fid) {
         0 => ipi_mailbox.FENCE_I, // remote_fence_i
-        1 => ipi_mailbox.SFENCE_VMA, // remote_sfence_vma
-        2 => ipi_mailbox.SFENCE_VMA, // remote_sfence_vma_asid
+        1, 2 => ipi_mailbox.SFENCE_VMA, // remote_sfence_vma / remote_sfence_vma_asid
         else => return .{ .err = SBI_ERR_NOT_SUPPORTED },
     };
 
@@ -143,9 +143,11 @@ fn rfence(fid: usize, args: [6]usize) Ret {
         if (mask & 1 != 0) {
             const target = base_hart + i;
             if (target == self) {
-                // Fence ourselves directly; never IPI self (it would deadlock).
-                if (ops & ipi_mailbox.FENCE_I != 0) asm volatile ("fence.i" ::: .{ .memory = true });
-                if (ops & ipi_mailbox.SFENCE_VMA != 0) asm volatile ("sfence.vma" ::: .{ .memory = true });
+                // Fence this hart directly. Never IPI self. That would deadlock.
+                if (ops & ipi_mailbox.FENCE_I != 0)
+                    asm volatile ("fence.i" ::: .{ .memory = true });
+                if (ops & ipi_mailbox.SFENCE_VMA != 0)
+                    asm volatile ("sfence.vma" ::: .{ .memory = true });
             } else {
                 ipi_mailbox.sendSync(target, ops);
             }
@@ -167,21 +169,40 @@ fn forEachHart(mask_in: usize, base_hart: usize, comptime run: fn (usize) void) 
 fn base(fid: usize, args: [6]usize) Ret {
     return switch (fid) {
         0 => .{ .val = 0x02000000 }, // spec version 2.0
-        1 => .{ .val = 0x4D575249 }, // impl id ("MWRI" - Midstall Weir)
+        1 => .{ .val = 0x4D575249 }, // impl id ("MWRI", Midstall Weir)
         2 => .{ .val = 1 }, // impl version
         3 => .{ .val = probe(args[0]) }, // probe_extension
-        4 => .{ .val = 0 }, // mvendorid
-        5 => .{ .val = 0 }, // marchid
-        6 => .{ .val = 0 }, // mimpid
+        4 => .{ .val = csr.read("mvendorid") }, // JEDEC vendor ID
+        5 => .{ .val = csr.read("marchid") }, // architecture ID
+        6 => .{ .val = csr.read("mimpid") }, // implementation ID
         else => .{ .err = SBI_ERR_NOT_SUPPORTED },
     };
 }
 
 fn probe(eid: usize) usize {
     return switch (eid) {
-        EID_LEGACY_PUTCHAR, EID_LEGACY_SHUTDOWN, EID_BASE, EID_TIME, EID_IPI, EID_RFENCE, EID_HSM, EID_DBCN, EID_SRST => 1,
+        EID_LEGACY_PUTCHAR,
+        EID_LEGACY_GETCHAR,
+        EID_LEGACY_SHUTDOWN,
+        EID_BASE,
+        EID_TIME,
+        EID_IPI,
+        EID_RFENCE,
+        EID_HSM,
+        EID_DBCN,
+        EID_SRST,
+        => 1,
         else => 0,
     };
+}
+
+/// Legacy console_getchar. The legacy ABI returns the byte in a0, which is
+/// `Ret.err` here, or -1 when the UART has no waiting input.
+fn legacyGetchar() Ret {
+    var b: [1]u8 = undefined;
+    var d = [_][]u8{&b};
+    if ((console.input.readVec(&d) catch 0) == 1) return .{ .err = b[0] };
+    return .{ .err = errCode(-1) };
 }
 
 fn dbcn(fid: usize, args: [6]usize) Ret {
@@ -192,14 +213,20 @@ fn dbcn(fid: usize, args: [6]usize) Ret {
             const n = args[0];
             const buf: [*]const u8 = @ptrFromInt(args[1]);
             var i: usize = 0;
-            while (i < n) : (i += 1) console.putc(buf[i]);
+            while (i < n) : (i += 1) console.out.writeByte(buf[i]) catch {};
             return .{ .val = n };
         },
-        // console_read: nothing to deliver yet.
-        1 => .{ .val = 0 },
+        // console_read(num_bytes, base_addr_lo, base_addr_hi): read waiting UART
+        // input into the identity-mapped buffer. Returns the byte count, which is
+        // 0 when nothing waits (a non-blocking poll, per the DBCN contract).
+        1 => {
+            const buf: [*]u8 = @ptrFromInt(args[1]);
+            var d = [_][]u8{buf[0..args[0]]};
+            return .{ .val = console.input.readVec(&d) catch 0 };
+        },
         // console_write_byte
         2 => {
-            console.putc(@truncate(args[0]));
+            console.out.writeByte(@truncate(args[0])) catch {};
             return .{};
         },
         else => .{ .err = SBI_ERR_NOT_SUPPORTED },

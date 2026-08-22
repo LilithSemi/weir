@@ -5,8 +5,8 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .conduit = .{
-            .url = "git+https://github.com/Midstall/conduit.git#7093da36ab4c5fd161388026d82b2b56ed47bc33",
-            .hash = "conduit-0.1.0-R_mFrDzUAwCjoYV_ZGQy5AW-P7x4D6AnhlYYjLnqEhDb",
+            .url = "git+https://github.com/Midstall/conduit#1d1a9d4f2ecda4fd91f571a63e816727c1a85fad",
+            .hash = "conduit-0.1.0-R_mFrKEiBQCsP4aH4NpICkETF0qb408ouijHM_x5VH8c",
         },
         .dtree = .{
             .url = "git+https://github.com/Midstall/dtree#974e557da3c6426eaf2b3284c26ff8740163d954",

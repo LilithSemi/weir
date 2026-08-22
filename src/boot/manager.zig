@@ -14,6 +14,7 @@ const pe = @import("../loader/pe.zig");
 const varstore = @import("../uefi/varstore.zig");
 const initrd = @import("../uefi/initrd.zig");
 const simplefs = @import("../uefi/simplefs.zig");
+const blockio = @import("../uefi/blockio.zig");
 const handledb = @import("../uefi/handledb.zig");
 const console = @import("../console/console.zig");
 const mem = @import("../mem.zig");
@@ -28,63 +29,91 @@ const INITRD_BASE: usize = mem.initrd_base;
 const INITRD_MAX: usize = 512 << 20;
 
 // EFI global variable namespace GUID (BootOrder, Boot####), on-disk bytes.
-const GLOBAL_GUID = [16]u8{ 0x61, 0xdf, 0xe4, 0x8b, 0xca, 0x93, 0xd2, 0x11, 0xaa, 0x0d, 0x00, 0xe0, 0x98, 0x03, 0x2b, 0x8c };
+const GLOBAL_GUID = [16]u8{
+    0x61, 0xdf, 0xe4, 0x8b, 0xca, 0x93, 0xd2, 0x11,
+    0xaa, 0x0d, 0x00, 0xe0, 0x98, 0x03, 0x2b, 0x8c,
+};
 
 const FALLBACK_PATH = "\\EFI\\BOOT\\BOOTRISCV64.EFI";
 
-var dev: block.Device = undefined;
+// loadBootImage() sets dev before findEsp reads it. block.Device is a vtable, so
+// zero-init would leave null function pointers.
+var dev: block.Device = undefined; // zippy:ignore unsafe_undefined
 
-/// Find the block device, mount the ESP, resolve the boot target, and load it.
+/// Walk every block device in boot order and load the first bootable image.
+/// Returns null when no device holds one.
 pub fn loadBootImage() ?pe.Loaded {
     const buf = @as([*]u8, @ptrFromInt(KERNEL_READ_BASE))[0..KERNEL_READ_MAX];
     if (!storage.init()) {
-        console.writeStr("[boot] no block device found\n");
+        console.out.writeAll("[boot] no block device found\n") catch {};
         return null;
     }
-    dev = storage.device();
+
+    for (storage.devices(), 0..) |sd, i| {
+        if (tryDevice(sd, i, buf)) |loaded| return loaded;
+        console.out.print(
+            "[boot] device {d} has no bootable image, trying the next\n",
+            .{i},
+        ) catch {};
+    }
+    console.out.writeAll("[boot] no device held a bootable image\n") catch {};
+    return null;
+}
+
+/// Try to load a bootable image from `sd` (device index `i`, for logs). Mount the
+/// ESP, resolve the boot target, and read it. Returns null to let the caller try
+/// the next device. Weir measures and publishes only once it commits to a device,
+/// so a device it skips leaves no trace in the TPM.
+fn tryDevice(sd: storage.Device, i: usize, buf: []u8) ?pe.Loaded {
+    dev = sd.dev;
 
     const part = gpt.findEsp(&dev) orelse blk: {
-        console.writeStr("[boot] no GPT ESP; treating whole disk as a filesystem\n");
+        console.out.print("[boot] device {d}: no GPT ESP, using the whole disk\n", .{i}) catch {};
         break :blk block.Partition{ .dev = &dev, .base_lba = 0, .num_blocks = dev.num_blocks };
     };
     const filesystem = fat.mount(part) orelse {
-        console.writeStr("[boot] could not mount a FAT filesystem\n");
+        console.out.print("[boot] device {d}: no FAT filesystem\n", .{i}) catch {};
         return null;
     };
-
-    // Publish the ESP via Simple File System so the loaded bootloader reads its
-    // own config/kernel/initrd through the standard protocol.
-    if (handledb.create()) |h| {
-        if (simplefs.install(h, part)) console.writeStr("[boot] ESP published via Simple File System\n");
-    }
 
     var path_buf: [256]u8 = undefined;
     const path = bootEntryPath(&path_buf) orelse FALLBACK_PATH;
-    console.printf("[boot] booting {s}\n", .{path});
-    // The boot path is part of the measured boot configuration.
-    tpm.measure(tpm.PCR_BOOT_CONFIG, path, "boot path");
-
     const n = filesystem.readFile(path, buf) orelse {
-        console.printf("[boot] {s} not found on the ESP\n", .{path});
+        console.out.print("[boot] device {d}: {s} not found on the ESP\n", .{ i, path }) catch {};
         return null;
     };
-    console.printf("[boot] read {d} bytes, loading PE\n", .{n});
+    console.out.print(
+        "[boot] booting {s} from device {d}, read {d} bytes\n",
+        .{ path, i, n },
+    ) catch {};
 
-    // Measure the boot loader into PCR 4 before running it: the root of the
-    // measured-boot chain Weir contributes (the loader then measures what it
-    // loads via the TCG2 protocol).
+    // Committed to this device. Name the disk in the device path after the real
+    // boot media (controller kind + MMIO base), so the ESP handle carries a
+    // distinct path a bootloader can match, then publish the ESP via Simple File
+    // System so the loaded bootloader reads its config, kernel, and initrd.
+    blockio.setBootMedia(@intFromEnum(sd.kind), sd.base);
+    if (handledb.create()) |h| {
+        if (simplefs.install(h, part))
+            console.out.writeAll("[boot] ESP published via Simple File System\n") catch {};
+    }
+
+    // The boot path is part of the measured boot configuration.
+    tpm.measure(tpm.PCR_BOOT_CONFIG, path, "boot path");
+    // Measure the boot loader into PCR 4 before Weir runs it. This is the root of
+    // the measured-boot chain Weir contributes. The loader then measures what it
+    // loads through the TCG2 protocol.
     tpm.measure(tpm.PCR_BOOT_LOADER, buf[0..n], "boot loader");
 
     // Optional initramfs from the ESP, served to the kernel stub via LoadFile2.
     const initrd_buf = @as([*]u8, @ptrFromInt(INITRD_BASE))[0..INITRD_MAX];
     if (filesystem.readFile("\\EFI\\BOOT\\initrd", initrd_buf)) |in| {
-        console.printf("[boot] initrd: {d} bytes from \\EFI\\BOOT\\initrd\n", .{in});
+        console.out.print("[boot] initrd: {d} bytes from \\EFI\\BOOT\\initrd\n", .{in}) catch {};
         tpm.measure(tpm.PCR_BOOT_LOADER, initrd_buf[0..in], "initrd");
         initrd.install(initrd_buf[0..in]);
     }
 
     return pe.load(buf[0..n]) catch |e| {
-        console.printf("[boot] PE load failed: {s}\n", .{@errorName(e)});
+        console.err.print("[boot] PE load failed: {s}\n", .{@errorName(e)}) catch {};
         return null;
     };
 }
@@ -96,7 +125,8 @@ fn bootEntryPath(out: []u8) ?[]const u8 {
 
     var order: [256]u8 = undefined;
     var order_size: usize = order.len;
-    if (varstore.get(uefiName("BootOrder"), &GLOBAL_GUID, null, &order_size, &order) != .success) return null;
+    if (varstore.get(uefiName("BootOrder"), &GLOBAL_GUID, null, &order_size, &order) != .success)
+        return null;
 
     var i: usize = 0;
     while (i + 2 <= order_size) : (i += 2) {
@@ -107,7 +137,7 @@ fn bootEntryPath(out: []u8) ?[]const u8 {
         var opt_size: usize = opt.len;
         if (varstore.get(var_name, &GLOBAL_GUID, null, &opt_size, &opt) != .success) continue;
         if (loadOptionPath(opt[0..opt_size], out)) |p| {
-            console.printf("[boot] Boot{x:0>4} selected\n", .{num});
+            console.out.print("[boot] Boot{x:0>4} selected\n", .{num}) catch {};
             return p;
         }
     }

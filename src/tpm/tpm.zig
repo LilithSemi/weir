@@ -80,7 +80,12 @@ fn initLog() void {
 }
 
 /// Append a TCG_PCR_EVENT2 for an already-computed digest.
-fn appendEvent(pcr: u32, event_type: u32, digest: *const [tpm2.SHA256_LEN]u8, event: []const u8) void {
+fn appendEvent(
+    pcr: u32,
+    event_type: u32,
+    digest: *const [tpm2.SHA256_LEN]u8,
+    event: []const u8,
+) void {
     // Bound check header(<=64) + digest + event. On overflow mark the log
     // truncated rather than drop silently: the PCR is extended, so the OS must
     // know the log is incomplete.
@@ -116,7 +121,7 @@ pub fn logTruncated() bool {
 }
 
 fn printHex(d: []const u8) void {
-    for (d) |b| console.printf("{x:0>2}", .{b});
+    for (d) |b| console.out.print("{x:0>2}", .{b}) catch {};
 }
 
 /// Bring up the TPM. Measured boot is best-effort: with no TPM (e.g. a board
@@ -125,21 +130,25 @@ pub fn init() void {
     // Only touch the TPM if the platform advertises one: probing an unmapped bus
     // faults.
     if (!platform.tpmPresent()) {
-        console.writeStr("[tpm] no TPM in platform description; measured boot disabled\n");
+        console.out.writeAll(
+            "[tpm] no TPM in platform description. Measured boot disabled\n",
+        ) catch {};
         return;
     }
     tis.setBase(platform.tpmBase());
     if (!tis.present()) {
-        console.writeStr("[tpm] TPM advertised but not responding; measured boot disabled\n");
+        console.err.writeAll(
+            "[tpm] TPM advertised but not responding. Measured boot disabled\n",
+        ) catch {};
         return;
     }
     if (!tpm2.startup()) {
-        console.writeStr("[tpm] startup failed; measured boot disabled\n");
+        console.err.writeAll("[tpm] startup failed. Measured boot disabled\n") catch {};
         return;
     }
     available = true;
     initLog();
-    console.writeStr("[tpm] TPM 2.0 ready; measured boot active\n");
+    console.out.writeAll("[tpm] TPM 2.0 ready. Measured boot active\n") catch {};
 }
 
 pub fn isAvailable() bool {
@@ -148,7 +157,12 @@ pub fn isAvailable() bool {
 
 /// Extend a precomputed digest into `pcr` and append a log entry. Shared by the
 /// firmware's own measurements and the EFI_TCG2 HashLogExtendEvent path.
-pub fn logExtend(pcr: u32, event_type: u32, digest: *const [tpm2.SHA256_LEN]u8, event: []const u8) bool {
+pub fn logExtend(
+    pcr: u32,
+    event_type: u32,
+    digest: *const [tpm2.SHA256_LEN]u8,
+    event: []const u8,
+) bool {
     if (!available) return false;
     if (!tpm2.pcrExtend(pcr, digest)) return false;
     appendEvent(pcr, event_type, digest, event);
@@ -157,12 +171,20 @@ pub fn logExtend(pcr: u32, event_type: u32, digest: *const [tpm2.SHA256_LEN]u8, 
 
 /// Record a measurement an earlier stage (the FSBL) already extended into a PCR,
 /// adding only the log entry so the event log accounts for the PCR's value.
-pub fn recordPrior(pcr: u32, event_type: u32, digest: *const [tpm2.SHA256_LEN]u8, desc: []const u8) void {
+pub fn recordPrior(
+    pcr: u32,
+    event_type: u32,
+    digest: *const [tpm2.SHA256_LEN]u8,
+    desc: []const u8,
+) void {
     if (!available) return;
     appendEvent(pcr, event_type, digest, desc);
-    console.printf("[tpm] {s} measured by earlier stage -> PCR{d} sha256:", .{ desc, pcr });
+    console.out.print(
+        "[tpm] {s} measured by earlier stage -> PCR{d} sha256:",
+        .{ desc, pcr },
+    ) catch {};
     printHex(digest[0..8]);
-    console.writeStr("...\n");
+    console.out.writeAll("...\n") catch {};
 }
 
 /// Extend a digest into a PCR without adding a log entry (TCG2 EXTEND_ONLY).
@@ -181,12 +203,15 @@ pub fn measureTyped(pcr: u32, event_type: u32, data: []const u8, desc: []const u
     var digest: [tpm2.SHA256_LEN]u8 = undefined;
     Sha256.hash(data, &digest, .{});
     if (!logExtend(pcr, event_type, &digest, desc)) {
-        console.printf("[tpm] PCR{d} extend failed for {s}\n", .{ pcr, desc });
+        console.err.print("[tpm] PCR{d} extend failed for {s}\n", .{ pcr, desc }) catch {};
         return;
     }
-    console.printf("[tpm] measured {s} ({d} bytes) -> PCR{d} sha256:", .{ desc, data.len, pcr });
+    console.out.print(
+        "[tpm] measured {s} ({d} bytes) -> PCR{d} sha256:",
+        .{ desc, data.len, pcr },
+    ) catch {};
     printHex(digest[0..8]);
-    console.writeStr("...\n");
+    console.out.writeAll("...\n") catch {};
 }
 
 /// Hash `data` with SHA-256 into `out` (for the protocol's hash helpers).
@@ -197,7 +222,7 @@ pub fn hash(data: []const u8, out: *[tpm2.SHA256_LEN]u8) void {
 extern var __rodata_end: u8;
 
 /// Measure Weir's own image (code + rodata) into PCR 0. Ideally the FSBL/mask ROM
-/// measures Weir before running it; self-measurement anchors the chain until that
+/// measures Weir before running it. Self-measurement anchors the chain until that
 /// lands.
 pub fn measureSelf(ram_base: usize) void {
     if (!available) return;
@@ -213,10 +238,10 @@ pub fn selfTest() void {
     measure(PCR_DEBUG, "Weir measured-boot self-test", "self-test");
     var pcr: [tpm2.SHA256_LEN]u8 = undefined;
     if (tpm2.pcrRead(PCR_DEBUG, &pcr)) {
-        console.writeStr("[tpm] PCR16 readback sha256:");
+        console.out.writeAll("[tpm] PCR16 readback sha256:") catch {};
         printHex(pcr[0..8]);
-        console.writeStr("...\n");
+        console.out.writeAll("...\n") catch {};
     } else {
-        console.writeStr("[tpm] PCR read failed\n");
+        console.err.writeAll("[tpm] PCR read failed\n") catch {};
     }
 }

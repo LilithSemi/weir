@@ -1,7 +1,7 @@
-//! Build-time configuration: blobs supplied through build.zig options.
+//! Build-time configuration. build.zig options supply these blobs.
 //!
-//! `-Daml=PATH` and `-Ddtb=PATH` embed an ACPI DSDT and/or a device tree so
-//! Weir can use a platform-provided description instead of generating one.
+//! The `-Daml=PATH` and `-Ddtb=PATH` options embed an ACPI DSDT or a device
+//! tree. Weir then uses a platform-provided description instead of generating one.
 
 const options = @import("build_options");
 
@@ -17,7 +17,8 @@ pub const payload: ?[]const u8 = if (options.has_payload) @embedFile("weir_paylo
 /// Real PE32+ EFI application to load via the PE/COFF loader, or null.
 pub const pe_app: ?[]const u8 = if (options.has_pe_app) @embedFile("weir_pe_app")[0..] else null;
 
-/// When true, load the boot PE off a virtio-blk disk instead of an embedded blob.
+/// When true, load the boot PE as a bare image at sector 0 of a disk (any block
+/// device the tree declares), instead of an embedded blob.
 pub const disk_boot: bool = options.disk_boot;
 
 /// When true, boot via the ESP boot manager (GPT + FAT + BootOrder/fallback).

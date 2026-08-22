@@ -4,7 +4,10 @@ zig-out/
 *.o
 
 # Generated/dumped device trees are passed via -Ddtb, never committed.
+*.dts
 *.dtb
+*.asl
+*.aml
 
 .direnv
 result

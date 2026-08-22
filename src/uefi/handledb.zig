@@ -18,7 +18,8 @@ const ProtocolEntry = struct {
 
 pub const Handle = struct {
     used: bool = false,
-    protocols: [MAX_PROTOCOLS]ProtocolEntry = undefined,
+    // Only protocols[0..count] ever gets read, so the tail can start undefined.
+    protocols: [MAX_PROTOCOLS]ProtocolEntry = undefined, // zippy:ignore unsafe_undefined
     count: usize = 0,
 };
 

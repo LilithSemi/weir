@@ -4,12 +4,13 @@
 const std = @import("std");
 const block = @import("../block/block.zig");
 const fs = @import("fs.zig");
-const console = @import("../console/console.zig");
 
 const Type = enum { fat12, fat16, fat32 };
 
 const State = struct {
-    part: block.Partition = undefined,
+    // mount() sets part before any read. block.Partition.dev is a non-null
+    // pointer, so zero-init would store an invalid device pointer.
+    part: block.Partition = undefined, // zippy:ignore unsafe_undefined
     bytes_per_sector: u32 = 0,
     sectors_per_cluster: u32 = 0,
     reserved: u32 = 0,
@@ -68,11 +69,12 @@ fn nextCluster(s: *const State, cluster: u32) u32 {
         .fat12 => {
             const off = cluster + cluster / 2;
             const buf = readFatSector(s, off / 512) orelse return 0xfff;
-            // A 12-bit entry can straddle a sector boundary; read two bytes safely.
+            // A 12-bit entry can straddle a sector boundary. Read two bytes safely.
             const lo = buf[off % 512];
             const hi = if (off % 512 == 511) blk: {
                 var nb: [512]u8 = undefined;
-                _ = s.part.readBlocks(s.first_fat_sector + off / 512 + 1, 1, &nb);
+                if (!s.part.readBlocks(s.first_fat_sector + off / 512 + 1, 1, &nb))
+                    return 0xfff;
                 break :blk nb[0];
             } else buf[off % 512 + 1];
             const v = @as(u16, lo) | (@as(u16, hi) << 8);
@@ -107,8 +109,8 @@ pub fn mount(part: block.Partition) ?fs.Fs {
 
     const data_sectors = total - s.first_data_sector;
     const clusters = data_sectors / s.sectors_per_cluster;
-    // A zero 16-bit FAT size means FAT32 (it uses the 32-bit field); reliable
-    // even for small volumes that the cluster-count rule would misjudge.
+    // A zero 16-bit FAT size means FAT32 (it uses the 32-bit field). This is
+    // reliable even for small volumes that the cluster-count rule would misjudge.
     s.kind = if (fat16_size == 0) .fat32 else if (clusters < 4085) .fat12 else .fat16;
 
     state = s;
@@ -165,8 +167,8 @@ fn findInDir(s: *State, dir: Dir, name: []const u8) ?Entry {
     var sector_in_root: u32 = 0;
 
     while (true) {
-        var sector: u32 = undefined;
-        var sectors_this: u32 = undefined;
+        var sector: u32 = 0;
+        var sectors_this: u32 = 0;
         switch (dir) {
             .root16 => {
                 if (sector_in_root >= s.root_dir_sectors) return null;
@@ -195,10 +197,10 @@ fn findInDir(s: *State, dir: Dir, name: []const u8) ?Entry {
                 if (attr == 0x0f) {
                     // LFN fragment: 13 UTF-16 chars at fixed offsets, reversed order.
                     const seq = ent[0] & 0x1f;
-                    const idx_positions = [13]usize{ 1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30 };
+                    const pos = [13]usize{ 1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30 };
                     var tmp: [13]u8 = undefined;
                     var tn: usize = 0;
-                    for (idx_positions) |p| {
+                    for (pos) |p| {
                         const ch = @as(u16, ent[p]) | (@as(u16, ent[p + 1]) << 8);
                         if (ch == 0 or ch == 0xffff) break;
                         tmp[tn] = if (ch < 0x80) @intCast(ch) else '?';
@@ -207,7 +209,8 @@ fn findInDir(s: *State, dir: Dir, name: []const u8) ?Entry {
                     const base = (seq - 1) * 13;
                     if (base + tn <= lfn.len) {
                         @memcpy(lfn[base .. base + tn], tmp[0..tn]);
-                        if (ent[0] & 0x40 != 0) lfn_len = base + tn; // last (first physically) entry sets length
+                        // The last fragment (first on disk) carries the length.
+                        if (ent[0] & 0x40 != 0) lfn_len = base + tn;
                     }
                     have_lfn = true;
                     continue;
@@ -272,7 +275,7 @@ fn readChain(s: *State, start_cluster: u32, size: u32, buf: []u8) ?usize {
 pub const Loc = struct { root16: bool, cluster: u32 };
 
 pub const DirEnt = struct {
-    name: [256]u16 = undefined, // UTF-16, null-terminated
+    name: [256]u16 = [_]u16{0} ** 256, // UTF-16, null-terminated
     name_units: usize = 0, // including the null
     cluster: u32 = 0,
     size: u32 = 0,
@@ -286,7 +289,7 @@ pub fn rootLoc() Loc {
         .{ .root16 = true, .cluster = 0 };
 }
 
-/// Scan a directory. With `want_name`, find that entry; else return the
+/// Scan a directory. With `want_name`, find that entry. Otherwise return the
 /// `want_index`-th real entry. Fills `out` with a UTF-16 name from LFN entries
 /// (or the 8.3 short name). Returns false at end.
 fn scan(s: *State, loc: Loc, want_index: ?usize, want_name: ?[]const u8, out: *DirEnt) bool {
@@ -298,8 +301,8 @@ fn scan(s: *State, loc: Loc, want_index: ?usize, want_name: ?[]const u8, out: *D
     var cluster = loc.cluster;
     var root_sector: u32 = 0;
     while (true) {
-        var sector: u32 = undefined;
-        var sectors_this: u32 = undefined;
+        var sector: u32 = 0;
+        var sectors_this: u32 = 0;
         if (loc.root16) {
             if (root_sector >= s.root_dir_sectors) return false;
             sector = s.root_dir_start + root_sector;
@@ -400,9 +403,9 @@ pub fn enumerate(loc: Loc, index: usize, out: *DirEnt) bool {
 
 /// Read up to `buf.len` bytes of a file starting at `offset`. Returns bytes read.
 // Sequential-read resume cache. Large files (kernel, large initrd) are read via
-// readRegion with advancing offsets; without this each call re-walks the chain
-// from the start, O(n^2) over the file. Remember where the last read ended so a
-// continuing read resumes from its cluster.
+// readRegion with advancing offsets. Without this cache each call re-walks the
+// chain from the start, O(n^2) over the file. Remember where the last read ended
+// so a continuing read resumes from its cluster.
 var rr_valid = false;
 var rr_start: u32 = 0;
 var rr_offset: u64 = 0;
@@ -413,8 +416,8 @@ pub fn readRegion(start_cluster: u32, size: u32, offset: u64, buf: []u8) usize {
     if (offset >= size) return 0;
     const cluster_bytes: u64 = @as(u64, s.sectors_per_cluster) * 512;
 
-    // Resume if this read continues the last one; else walk to the offset.
-    var cluster: u32 = undefined;
+    // Resume if this read continues the last one. Otherwise walk to the offset.
+    var cluster: u32 = 0;
     if (rr_valid and rr_start == start_cluster and rr_offset == offset and offset != 0) {
         cluster = rr_cluster;
     } else {
@@ -433,7 +436,8 @@ pub fn readRegion(start_cluster: u32, size: u32, offset: u64, buf: []u8) usize {
         const sector = clusterToSector(s, cluster);
         var in_cluster = pos % cluster_bytes;
         while (in_cluster < cluster_bytes and produced < buf.len and pos < size) {
-            const want = @min(cluster_bytes - in_cluster, @min(@as(u64, buf.len - produced), size - pos));
+            const remaining = @min(@as(u64, buf.len - produced), size - pos);
+            const want = @min(cluster_bytes - in_cluster, remaining);
             if (in_cluster % 512 == 0 and want >= 512) {
                 // Aligned run: read whole sectors straight into the caller's
                 // buffer in one multi-sector request, no bounce.
@@ -456,7 +460,8 @@ pub fn readRegion(start_cluster: u32, size: u32, offset: u64, buf: []u8) usize {
                 }
                 const sec_off: usize = @intCast(in_cluster % 512);
                 const avail = @min(@as(u64, 512 - sec_off), want);
-                @memcpy(buf[produced..][0..@intCast(avail)], sector_buf[sec_off..][0..@intCast(avail)]);
+                const n: usize = @intCast(avail);
+                @memcpy(buf[produced..][0..n], sector_buf[sec_off..][0..n]);
                 produced += @intCast(avail);
                 pos += avail;
                 in_cluster += avail;
@@ -474,9 +479,9 @@ pub fn readRegion(start_cluster: u32, size: u32, offset: u64, buf: []u8) usize {
     return produced;
 }
 
-fn readFileImpl(ctx: *anyopaque, path: []const u8, buf: []u8) ?usize {
-    const s: *State = @ptrCast(@alignCast(ctx));
-
+/// Resolve `path` to a regular file's directory entry on the mounted volume, or
+/// null if a component is missing or the final component is a directory.
+fn resolve(s: *State, path: []const u8) ?Entry {
     var dir: Dir = if (s.kind == .fat32) .{ .chain = s.root_cluster } else .root16;
     var it = std.mem.tokenizeAny(u8, path, "/\\");
     var entry: ?Entry = null;
@@ -490,6 +495,23 @@ fn readFileImpl(ctx: *anyopaque, path: []const u8, buf: []u8) ?usize {
             entry = found;
         }
     }
-    const f = entry orelse return null;
+    return entry;
+}
+
+fn readFileImpl(ctx: *anyopaque, path: []const u8, buf: []u8) ?usize {
+    const s: *State = @ptrCast(@alignCast(ctx));
+    const f = resolve(s, path) orelse return null;
     return readChain(s, f.cluster, f.size, buf);
+}
+
+/// File size in bytes of `path` on the mounted volume, or null if absent. The
+/// boot-services LoadImage sizes its read buffer with this.
+pub fn fileSize(path: []const u8) ?u32 {
+    return (resolve(&state, path) orelse return null).size;
+}
+
+/// Read the whole file at `path` on the mounted volume into `buf`. Same contract
+/// as the Fs read_file hook, for callers that hold no Fs handle.
+pub fn readFile(path: []const u8, buf: []u8) ?usize {
+    return readFileImpl(&state, path, buf);
 }

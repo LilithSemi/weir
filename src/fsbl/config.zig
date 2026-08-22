@@ -1,6 +1,6 @@
 //! FSBL configuration. Hardware addresses come from the `soc` module at
-//! comptime; the flash layout (where the main image sits) comes from the
-//! `river-firmware` device-tree partition, so one source targets different SoC
+//! comptime. The flash layout (where the main image sits) comes from the
+//! `river-firmware` device-tree partition. One source targets different SoC
 //! families via -Ddtb with no build flags.
 
 const soc = @import("soc");
@@ -21,9 +21,6 @@ pub const flash_base: usize = soc.flash_base;
 /// Whether this SoC has a TPM the FSBL should measure into, and its base.
 pub const tpm_present: bool = soc.tpm_present;
 pub const tpm_base: usize = soc.tpm_base;
-
-/// DDR read-training control window (0 = the controller needs no CPU training).
-pub const ddr_train_base: usize = soc.ddr_train_base;
 
 /// Offset + max size of the main Weir image within flash, from the
 /// `river-firmware` device-tree partition. tools/fdt_ld.zig lowers the

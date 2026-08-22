@@ -1,13 +1,13 @@
 //! QEMU fw_cfg over MMIO. Used to pull QEMU's generated ACPI tables
 //! (etc/acpi/tables, etc/acpi/rsdp, etc/table-loader), as EDK2/OVMF does, and
 //! republish them to the OS. Only the byte-stream (non-DMA) read path is
-//! implemented; the ACPI blobs are small, so throughput does not matter.
+//! implemented. The ACPI blobs are small, so throughput does not matter.
 
 const std = @import("std");
 
 // QEMU virt places the fw-cfg-mmio device here (DTB node fw-cfg@10100000,
 // reg = <0x10100000 0x18>, compatible "qemu,fw-cfg-mmio"). The base is set from
-// the DTB at discovery; 0 means no fw-cfg device exists on this platform (e.g.
+// the DTB at discovery. 0 means no fw-cfg device exists on this platform (e.g.
 // a real River SoC). Probing a hardcoded address blind faults on a bus with no
 // device mapped there, so every entry point guards on base != 0.
 var base_v: usize = 0;
@@ -31,7 +31,7 @@ fn dataReg() *volatile u8 {
     return @ptrFromInt(base_v + REG_DATA);
 }
 
-/// Select an item; this also resets its read offset to zero.
+/// Select an item. This also resets its read offset to zero.
 fn select(key: u16) void {
     selectorReg().* = @byteSwap(key); // the selector register is big-endian
 }
@@ -39,6 +39,13 @@ fn select(key: u16) void {
 fn readBytes(buf: []u8) void {
     const d = dataReg();
     for (buf) |*b| b.* = d.*;
+}
+
+fn skipBytes(n: usize) void {
+    const d = dataReg();
+    var i: usize = 0;
+    // The volatile read advances the fw_cfg stream. We discard the value.
+    while (i < n) : (i += 1) _ = d.*; // zippy:ignore discarded_error
 }
 
 fn readBe32() u32 {
@@ -73,7 +80,7 @@ pub fn find(name: []const u8) ?File {
     while (i < count) : (i += 1) {
         const size = readBe32();
         const sel = readBe16();
-        _ = readBe16(); // reserved
+        skipBytes(2); // skip the 2-byte reserved field
         var namebuf: [56]u8 = undefined;
         readBytes(&namebuf);
         const n = std.mem.indexOfScalar(u8, &namebuf, 0) orelse namebuf.len;

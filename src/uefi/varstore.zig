@@ -17,7 +17,6 @@ const platform = @import("../platform.zig");
 
 const MAGIC: u32 = 0x31535657; // "WVS1"
 const STATE_VALID: u32 = 0x00000001;
-const STATE_ERASED: u32 = 0xffffffff;
 
 pub const MAX_VARS = 64;
 pub const NAME_UNITS = 128; // u16 units incl null terminator
@@ -25,12 +24,15 @@ pub const DATA_BYTES = 1024;
 const STORE_LIMIT = 64 * 1024; // bytes of flash we use for the store
 
 pub const Var = struct {
+    // guid/name/data hold valid bytes only while used is true. name_units and
+    // data_len bound the live spans, so the arrays can start undefined.
     used: bool = false,
     attributes: u32 = 0,
-    guid: [16]u8 = undefined,
-    name: [NAME_UNITS]u16 = undefined, // null-terminated UTF-16
+    guid: [16]u8 = undefined, // zippy:ignore unsafe_undefined
+    // UTF-16, null-terminated.
+    name: [NAME_UNITS]u16 = undefined, // zippy:ignore unsafe_undefined
     name_units: usize = 0, // includes the null terminator
-    data: [DATA_BYTES]u8 = undefined,
+    data: [DATA_BYTES]u8 = undefined, // zippy:ignore unsafe_undefined
     data_len: usize = 0,
 };
 
@@ -72,7 +74,7 @@ pub fn init() void {
     for (&vars) |*v| v.used = false;
     cfi.setBase(platform.cfiFlashBase()); // 0 on a real River SoC: init()==false
     if (!cfi.init()) {
-        console.writeStr("[var] no flash; variables are unavailable\n");
+        console.out.writeAll("[var] no flash. Variables are unavailable\n") catch {};
         loaded = false;
         return;
     }
@@ -81,7 +83,7 @@ pub fn init() void {
     var hdr: [4]u8 = undefined;
     cfi.read(0, &hdr);
     if (std.mem.readInt(u32, &hdr, .little) != MAGIC) {
-        console.writeStr("[var] flash store empty, starting fresh\n");
+        console.out.writeAll("[var] flash store empty, starting fresh\n") catch {};
         return;
     }
 
@@ -110,7 +112,7 @@ pub fn init() void {
         pos += 32 + name_bytes + data_bytes;
         pos = (pos + 3) & ~@as(usize, 3);
     }
-    console.printf("[var] loaded {d} variable(s) from flash\n", .{count});
+    console.out.print("[var] loaded {d} variable(s) from flash\n", .{count}) catch {};
 }
 
 /// Rewrite the flash store from the RAM cache. Returns false on flash error.
@@ -148,11 +150,24 @@ pub fn available() bool {
 
 // --- Operations used by the EFI variable runtime services -------------------
 
-pub const Result = enum { success, not_found, buffer_too_small, invalid, out_of_resources, device_error };
+pub const Result = enum {
+    success,
+    not_found,
+    buffer_too_small,
+    invalid,
+    out_of_resources,
+    device_error,
+};
 
 /// Copy a variable's data out. On buffer_too_small, sets `data_size` to the
 /// required size.
-pub fn get(name: [*:0]const u16, guid: *const [16]u8, attributes: ?*u32, data_size: *usize, data: ?[*]u8) Result {
+pub fn get(
+    name: [*:0]const u16,
+    guid: *const [16]u8,
+    attributes: ?*u32,
+    data_size: *usize,
+    data: ?[*]u8,
+) Result {
     const v = find(name, guid) orelse return .not_found;
     if (attributes) |a| a.* = v.attributes;
     if (data_size.* < v.data_len or data == null) {
@@ -165,7 +180,13 @@ pub fn get(name: [*:0]const u16, guid: *const [16]u8, attributes: ?*u32, data_si
 }
 
 /// Set, replace, or (data_size==0) delete a variable, persisting to flash.
-pub fn set(name: [*:0]const u16, guid: *const [16]u8, attributes: u32, data_size: usize, data: ?[*]const u8) Result {
+pub fn set(
+    name: [*:0]const u16,
+    guid: *const [16]u8,
+    attributes: u32,
+    data_size: usize,
+    data: ?[*]const u8,
+) Result {
     const nu = u16len(name);
     if (nu > NAME_UNITS or data_size > DATA_BYTES) return .out_of_resources;
 
@@ -207,7 +228,9 @@ pub fn next(name_size: *usize, name: [*:0]u16, guid: *[16]u8) Result {
             name_size.* = bytes;
             return .success;
         }
-        if (std.mem.eql(u8, &v.guid, guid) and nameEql(v.name[0..v.name_units], v.name_units, name)) {
+        if (std.mem.eql(u8, &v.guid, guid) and
+            nameEql(v.name[0..v.name_units], v.name_units, name))
+        {
             return_next = true;
         }
     }

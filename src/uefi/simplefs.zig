@@ -10,6 +10,7 @@ const fat = @import("../fs/fat.zig");
 const handledb = @import("handledb.zig");
 const blockio = @import("blockio.zig");
 const block = @import("../block/block.zig");
+const console = @import("../console/console.zig");
 
 const Status = uefi.Status;
 const ok = @intFromEnum(Status.success);
@@ -19,20 +20,23 @@ const SimpleFileSystem = uefi.protocol.SimpleFileSystem;
 const MAX_OPEN = 16;
 
 const Handle = struct {
-    proto: File = undefined, // MUST be first: a *File is a *Handle
+    // proto MUST be the first field: a *File aliases a *Handle. alloc() sets it.
+    proto: File = undefined, // zippy:ignore unsafe_undefined
     used: bool = false,
     is_dir: bool = false,
     loc: fat.Loc = .{ .root16 = false, .cluster = 0 }, // a directory's own location
     cluster: u32 = 0, // a file's start cluster
     size: u32 = 0,
     position: u64 = 0, // file byte offset, or directory entry index
-    name: [256]u16 = undefined,
+    // Only name[0..name_units] holds valid units.
+    name: [256]u16 = undefined, // zippy:ignore unsafe_undefined
     name_units: usize = 1,
 };
 
 var handles: [MAX_OPEN]Handle = undefined;
-var sfs: SimpleFileSystem = undefined;
-var dev_path: [66]u8 = undefined; // DISK_BASE(20) + HardDrive(42) + End(4)
+// install() fills sfs before the app opens a volume.
+var sfs: SimpleFileSystem = undefined; // zippy:ignore unsafe_undefined
+var dev_path: [66]u8 = undefined; // disk_base(20) + HardDrive(42) + End(4)
 var mounted = false;
 
 // EFI_DEVICE_PATH_PROTOCOL 09576e91-6d3f-11d2-8e39-00a0c969723b
@@ -87,7 +91,13 @@ fn openVolume(self: *const SimpleFileSystem, out: **File) callconv(.c) usize {
 
 // --- File protocol ----------------------------------------------------------
 
-fn fileOpen(self: *File, new: **File, name: [*:0]const u16, mode: u64, attr: u64) callconv(.c) usize {
+fn fileOpen(
+    self: *File,
+    new: **File,
+    name: [*:0]const u16,
+    mode: u64,
+    attr: u64,
+) callconv(.c) usize {
     _ = mode;
     _ = attr;
     const h: *Handle = @ptrCast(self);
@@ -166,11 +176,19 @@ fn fileRead(self: *File, buffer_size: *usize, buffer: [*]u8) callconv(.c) usize 
             buffer_size.* = 0; // end of directory
             return ok;
         }
-        const st = writeFileInfo(buffer[0..buffer_size.*], buffer_size, ent.name[0..ent.name_units], ent.size, ent.is_dir);
+        const st = writeFileInfo(
+            buffer[0..buffer_size.*],
+            buffer_size,
+            ent.name[0..ent.name_units],
+            ent.size,
+            ent.is_dir,
+        );
         if (st == ok) h.position += 1;
         return st;
     }
-    const want = @min(buffer_size.*, @as(usize, @intCast(h.size)) -| @as(usize, @intCast(@min(h.position, h.size))));
+    const size: usize = @intCast(h.size);
+    const at: usize = @intCast(@min(h.position, h.size));
+    const want = @min(buffer_size.*, size -| at);
     const n = fat.readRegion(h.cluster, h.size, h.position, buffer[0..want]);
     h.position += n;
     buffer_size.* = n;
@@ -197,7 +215,12 @@ fn fileSetPosition(self: *File, pos: u64) callconv(.c) usize {
     return ok;
 }
 
-fn fileGetInfo(self: *const File, guid: *align(8) const uefi.Guid, size: *usize, buffer: ?[*]u8) callconv(.c) usize {
+fn fileGetInfo(
+    self: *const File,
+    guid: *align(8) const uefi.Guid,
+    size: *usize,
+    buffer: ?[*]u8,
+) callconv(.c) usize {
     const h: *const Handle = @ptrCast(self);
     if (!std.mem.eql(u8, std.mem.asBytes(guid), std.mem.asBytes(&File.Info.File.guid))) {
         return @intFromEnum(Status.unsupported);
@@ -209,7 +232,12 @@ fn fileGetInfo(self: *const File, guid: *align(8) const uefi.Guid, size: *usize,
     return writeFileInfo(buf, size, h.name[0..h.name_units], h.size, h.is_dir);
 }
 
-fn fileSetInfo(self: *File, guid: *align(8) const uefi.Guid, size: usize, buffer: [*]const u8) callconv(.c) usize {
+fn fileSetInfo(
+    self: *File,
+    guid: *align(8) const uefi.Guid,
+    size: usize,
+    buffer: [*]const u8,
+) callconv(.c) usize {
     _ = self;
     _ = guid;
     _ = size;
@@ -236,9 +264,16 @@ fn writeFileInfo(buf: []u8, size: *usize, name: []const u16, file_size: u32, is_
     // create/access/mod times left zero (24..72)
     std.mem.writeInt(u64, buf[72..80], if (is_dir) 0x10 else 0, .little); // Attribute
     var i: usize = 0;
-    while (i < name.len) : (i += 1) std.mem.writeInt(u16, buf[80 + i * 2 ..][0..2], name[i], .little);
+    while (i < name.len) : (i += 1) {
+        std.mem.writeInt(u16, buf[80 + i * 2 ..][0..2], name[i], .little);
+    }
     size.* = needed;
     return ok;
+}
+
+// The handle DB has room during setup, so install never returns null here.
+fn addProtocol(handle: *handledb.Handle, guid: *const uefi.Guid, iface: *anyopaque) void {
+    _ = handledb.install(handle, guid, iface); // zippy:ignore discarded_error
 }
 
 /// Mount FAT on `part` and install Simple File System + a Device Path on
@@ -250,7 +285,7 @@ pub fn install(handle: *handledb.Handle, part: block.Partition) bool {
     sfs = .{ .revision = 0x00010000, ._open_volume = @ptrFromInt(@intFromPtr(&openVolume)) };
 
     // <disk base>/HardDrive(part)/End so it matches the disk handle's prefix.
-    @memcpy(dev_path[0..20], &blockio.DISK_BASE);
+    @memcpy(dev_path[0..20], &blockio.disk_base);
     dev_path[20] = 0x04; // Media
     dev_path[21] = 0x01; // Hard Drive
     std.mem.writeInt(u16, dev_path[22..24], 42, .little);
@@ -265,8 +300,8 @@ pub fn install(handle: *handledb.Handle, part: block.Partition) bool {
     std.mem.writeInt(u16, dev_path[64..66], 4, .little);
 
     mounted = true;
-    _ = handledb.install(handle, &DEVICE_PATH_GUID, @ptrCast(&dev_path));
+    addProtocol(handle, &DEVICE_PATH_GUID, @ptrCast(&dev_path));
     blockio.installPartition(handle, part); // a complete volume: Block I/O too
-    _ = handledb.install(handle, &SimpleFileSystem.guid, @ptrCast(&sfs));
+    addProtocol(handle, &SimpleFileSystem.guid, @ptrCast(&sfs));
     return true;
 }

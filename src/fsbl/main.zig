@@ -1,7 +1,7 @@
 //! FSBL flow: console up, DDR up, copy main Weir into DRAM, jump to it.
 
 const std = @import("std");
-const uart = @import("uart");
+const conduit = @import("conduit");
 const ddr = @import("ddr.zig");
 const flash = @import("flash.zig");
 const measure = @import("measure.zig");
@@ -9,36 +9,44 @@ const cfg = @import("config.zig");
 
 pub const panic = std.debug.FullPanic(panicHandler);
 
-var con = uart.Ns16550a{ .base = cfg.uart_base, .divisor = cfg.uart_divisor };
+// The FSBL console: conduit's ns16550a with a std.Io.Writer over it. River gates
+// TX on a nonzero divisor and stalls on FCR/MCR writes, so use minimal_init.
+// run() calls uart_dev.init() to program the baud before real output.
+var uart_dev = conduit.driver.ns16550a.Ns16550a{
+    .mmio = conduit.Mmio.direct(cfg.uart_base),
+    .divisor = cfg.uart_divisor,
+    .minimal_init = true,
+};
+var con_buf: [0]u8 = .{};
+var ws = uart_dev.serial().writer(&con_buf);
+const con: *std.Io.Writer = &ws.interface;
 
 fn panicHandler(msg: []const u8, ret_addr: ?usize) noreturn {
-    con.writeStr("\n[fsbl] PANIC: ");
-    con.writeStr(msg);
-    con.writeStr("\n");
+    con.writeAll("\n[fsbl] PANIC: ") catch {};
+    con.writeAll(msg) catch {};
+    con.writeAll("\n") catch {};
     _ = ret_addr;
     while (true) asm volatile ("wfi");
 }
 
 pub fn run(hartid: usize, dtb: usize) noreturn {
-    con.base = cfg.uart_base;
-    con.divisor = cfg.uart_divisor;
-    con.init();
-    con.writeStr("\n[fsbl] Weir FSBL: DDR bring-up + main load\n");
+    uart_dev.init();
+    con.writeAll("\n[fsbl] Weir FSBL: DDR bring-up + main load\n") catch {};
 
-    if (!ddr.init(&con)) {
-        con.writeStr("[fsbl] FATAL: DDR read training failed; halting\n");
+    if (!ddr.init(con)) {
+        con.writeAll("[fsbl] FATAL: DDR read training failed. Halting\n") catch {};
         while (true) asm volatile ("wfi");
     }
 
-    const len = flash.loadMain(&con) orelse {
-        con.writeStr("[fsbl] FATAL: could not load main firmware\n");
+    const len = flash.loadMain(con) orelse {
+        con.writeAll("[fsbl] FATAL: could not load main firmware\n") catch {};
         while (true) asm volatile ("wfi");
     };
 
     // Root of trust: measure the loaded firmware before running it.
-    measure.measureMain(&con, len);
+    measure.measureMain(con, len);
 
-    con.writeStr("[fsbl] jumping to main firmware in DRAM\n");
+    con.writeAll("[fsbl] jumping to main firmware in DRAM\n") catch {};
     jumpToMain(hartid, dtb);
 }
 

@@ -1,0 +1,53 @@
+# Glossary
+
+Short definitions for the terms used across these docs.
+
+- **ACPI** - Advanced Configuration and Power Interface. Tables that describe the platform to the OS.
+- **almanac** - Conduit's ACPI table builder.
+- **ASD-STE100** - Simplified Technical English, a controlled-English standard from the aerospace and defence industry. Weir writes its docs and comments in it.
+- **cache as RAM** - Using the CPU cache as scratch RAM before DRAM is ready.
+- **CLINT** - Core-Local Interruptor. It provides the machine timer and software interrupts.
+- **Conduit** - Midstall's hardware-abstraction library. Weir gets its drivers from it.
+- **CSR** - Control and Status Register. A RISC-V processor register.
+- **DDR** - The DRAM main memory, and its double-data-rate interface.
+- **device tree** - A data structure that describes the hardware. Weir reads it at build time. Also DTB.
+- **ecall** - A RISC-V instruction that traps to a higher privilege level. The OS calls the SBI with it.
+- **ESP** - EFI System Partition. The FAT partition a UEFI bootloader lives on.
+- **FAT** - File Allocation Table. The filesystem on an ESP.
+- **fdt2ld** - The host tool that generates Weir's linker script from the device tree.
+- **Ferrite** - Midstall's kernel.
+- **FSBL** - First-stage boot loader. It trains the DDR and loads the firmware. See [fsbl.md](fsbl.md).
+- **GOP** - Graphics Output Protocol. The UEFI framebuffer protocol.
+- **GPT** - GUID Partition Table. The partition layout the boot manager reads.
+- **Harbor** - Midstall's peripheral IP family, such as the SPI and SDHCI controllers.
+- **hart** - A RISC-V hardware thread.
+- **HSM** - Hart State Management. The SBI extension that starts and stops harts.
+- **initramfs** - The initial RAM filesystem the kernel loads. Also initrd.
+- **IronStyle** - Midstall's Zig coding style.
+- **JTAG** - The hardware debug interface. Attach OpenOCD over it.
+- **M-mode** - Machine mode, the highest RISC-V privilege. Weir runs here.
+- **measured boot** - Hashing each boot stage into a TPM. See [measured-boot.md](measured-boot.md).
+- **MMIO** - Memory-mapped I/O. Device registers in the address space.
+- **MTD** - Memory Technology Device. The Linux interface to flash.
+- **NS16550A** - The 8250-family UART Weir uses for the console.
+- **OpenOCD** - The on-chip debugger. River ships config files for it.
+- **PCR** - Platform Configuration Register. A TPM register that holds a measurement.
+- **PE** - Portable Executable. The format of a UEFI application.
+- **PHY** - The physical-layer block of the DDR controller. The FSBL trains it.
+- **Pmod** - A Digilent peripheral-module connector. The reference SD card sits on one.
+- **River** - Midstall's RISC-V SoC. Creek V1 and Delta V1 are versions.
+- **RTC** - Real-time clock. Weir reads the wall-clock time from it.
+- **S-mode** - Supervisor mode. The OS runs here.
+- **SBI** - Supervisor Binary Interface. Weir provides it to the OS. See [sbi.md](sbi.md).
+- **SD / MMC** - The removable storage card and its interface.
+- **secure boot** - Authenticating each image before it runs. Planned.
+- **SMBIOS** - System Management BIOS. Tables that report the board identity.
+- **SPI** - Serial Peripheral Interface. Weir reads an SD card over it.
+- **Sstc** - The RISC-V supervisor timer extension.
+- **TCG** - Trusted Computing Group. It defines the TPM and the event log.
+- **TIS** - TPM Interface Specification. The MMIO interface to the TPM.
+- **TPM** - Trusted Platform Module. It holds the measured-boot state.
+- **UART** - The serial port. Weir's console.
+- **UEFI** - Unified Extensible Firmware Interface. The boot environment Weir presents to a bootloader or the OS. See [uefi.md](uefi.md).
+- **XIP** - Execute in place. Running code directly from flash.
+- **zippy** - Midstall's linter for Zig.

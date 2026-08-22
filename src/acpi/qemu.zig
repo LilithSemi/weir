@@ -1,10 +1,11 @@
-//! Load QEMU's generated ACPI tables via fw_cfg and link them in memory.
+//! Load QEMU's generated ACPI tables through fw_cfg and link them in memory.
 //!
 //! QEMU hands firmware three fw_cfg files: etc/acpi/tables (concatenated SDTs),
 //! etc/acpi/rsdp (the Root System Description Pointer), and etc/table-loader (a
-//! command script). The script directs us to allocate each blob, patch the
-//! cross-table pointers to the chosen addresses, and recompute checksums; the
-//! result is a self-consistent RSDP to publish to the OS. Mirrors EDK2/OVMF.
+//! command script). The script tells Weir to allocate each blob, patch the
+//! cross-table pointers to the chosen addresses, and recompute the checksums.
+//! The result is a self-consistent RSDP to publish to the OS. This mirrors
+//! EDK2/OVMF.
 
 const std = @import("std");
 const almanac = @import("conduit").almanac;
@@ -22,7 +23,7 @@ var pool_next: usize = POOL_BASE;
 var rsdp_addr: usize = 0;
 
 const Blob = struct {
-    name: [56]u8 = undefined,
+    name: [56]u8 = [_]u8{0} ** 56,
     name_len: usize = 0,
     buf: []u8 = &.{},
 };
@@ -54,7 +55,9 @@ fn nameLen(field: []const u8) usize {
 const CMD_ALLOCATE: u32 = 1;
 const CMD_ADD_POINTER: u32 = 2;
 const CMD_ADD_CHECKSUM: u32 = 3;
-const CMD_WRITE_POINTER: u32 = 4;
+// Opcode 4 is WRITE_POINTER. It asks the host to write a blob address back into
+// a fw_cfg file. Weir does not need it, so the loop below skips it (else prong).
+const CMD_WRITE_POINTER: u32 = 4; // zippy:ignore unused_decl -- documents the loader opcode set
 
 const ENTRY_SIZE = 128;
 
@@ -66,13 +69,14 @@ pub fn loadTables() ?usize {
     if (!fwcfg.present()) return null;
 
     const loader_file = fwcfg.find("etc/table-loader") orelse return null;
-    _ = fwcfg.find("etc/acpi/tables") orelse return null;
-    _ = fwcfg.find("etc/acpi/rsdp") orelse return null;
+    // Fail early if either ACPI blob is missing. table-loader names them again.
+    _ = fwcfg.find("etc/acpi/tables") orelse return null; // zippy:ignore discarded_error
+    _ = fwcfg.find("etc/acpi/rsdp") orelse return null; // zippy:ignore discarded_error
 
     // The loader script itself lives in a scratch buffer, not the ACPI pool.
     var loader_buf: [8192]u8 = undefined;
     if (loader_file.size > loader_buf.len) {
-        console.writeStr("[acpi] table-loader too large\n");
+        console.err.writeAll("[acpi] table-loader too large\n") catch {};
         return null;
     }
     fwcfg.read(loader_file, &loader_buf);
@@ -88,14 +92,16 @@ pub fn loadTables() ?usize {
             CMD_ALLOCATE => if (!doAllocate(e)) return null,
             CMD_ADD_POINTER => doAddPointer(e),
             CMD_ADD_CHECKSUM => doAddChecksum(e),
-            CMD_WRITE_POINTER => {}, // host-notify only; nothing the OS needs to read
-            else => {}, // unknown/zero-padded trailing entries
+            else => {}, // WRITE_POINTER is host-notify, others are zero padding
         }
     }
 
     const rsdp_blob = blobByName("etc/acpi/rsdp") orelse return null;
     rsdp_addr = @intFromPtr(rsdp_blob.buf.ptr);
-    console.printf("[acpi] fw_cfg tables linked: RSDP @ {x}, {d} blobs, {d} bytes used\n", .{ rsdp_addr, blob_count, pool_next - POOL_BASE });
+    console.out.print(
+        "[acpi] fw_cfg tables linked: RSDP @ {x}, {d} blobs, {d} bytes used\n",
+        .{ rsdp_addr, blob_count, pool_next - POOL_BASE },
+    ) catch {};
     return rsdp_addr;
 }
 
@@ -106,11 +112,11 @@ fn doAllocate(e: []const u8) bool {
     const len = nameLen(name);
 
     const file = fwcfg.find(name[0..len]) orelse {
-        console.printf("[acpi] ALLOCATE: missing file '{s}'\n", .{name[0..len]});
+        console.out.print("[acpi] ALLOCATE: missing file '{s}'\n", .{name[0..len]}) catch {};
         return false;
     };
     const buf = poolAlloc(file.size, alignment) orelse {
-        console.writeStr("[acpi] ACPI pool exhausted\n");
+        console.err.writeAll("[acpi] ACPI pool exhausted\n") catch {};
         return false;
     };
     fwcfg.read(file, buf);
@@ -134,10 +140,11 @@ fn doAddPointer(e: []const u8) void {
     const dest = blobByName(dest_name[0..nameLen(dest_name)]) orelse return;
     const src = blobByName(src_name[0..nameLen(src_name)]) orelse return;
 
-    // The offset/size come from the loader script; clamp to the destination blob
-    // so a malformed command cannot scribble past it into the ACPI pool.
+    // The offset and size come from the loader script. Clamp them to the
+    // destination blob so a malformed command cannot write past it into the ACPI
+    // pool.
     if (size > 8 or @as(usize, ptr_off) + size > dest.buf.len) {
-        console.writeStr("[acpi] ADD_POINTER out of range\n");
+        console.err.writeAll("[acpi] ADD_POINTER out of range\n") catch {};
         return;
     }
 
@@ -161,7 +168,7 @@ fn doAddChecksum(e: []const u8) void {
     // Offsets are from the loader script: keep the checksum slot and the summed
     // range inside the blob.
     if (csum_off >= b.buf.len or start > b.buf.len or length > b.buf.len - start) {
-        console.writeStr("[acpi] ADD_CHECKSUM out of range\n");
+        console.err.writeAll("[acpi] ADD_CHECKSUM out of range\n") catch {};
         return;
     }
     b.buf[csum_off] = 0;
@@ -173,9 +180,15 @@ pub fn rsdp() usize {
     return rsdp_addr;
 }
 
+/// Register an RSDP built elsewhere (acpi.zig's own tables on a real SoC), so the
+/// one RSDP accessor and the UEFI config-table publish path cover both sources.
+pub fn setRsdp(addr: usize) void {
+    rsdp_addr = addr;
+}
+
 /// Recompute an in-place ACPI checksum: zero the slot, then stamp the byte that
-/// makes the whole buffer sum to zero. The Builder does this automatically for
-/// tables it lays down; this is for patching tables already in memory.
+/// makes the whole buffer sum to zero. The Builder does this for tables it lays
+/// down. Use this to patch tables already in memory.
 fn writeChecksum(buf: []u8, csum_index: usize) void {
     buf[csum_index] = 0;
     buf[csum_index] = almanac.checksum.compute(buf);
@@ -183,9 +196,9 @@ fn writeChecksum(buf: []u8, csum_index: usize) void {
 
 const OEM_ID = "MIDSTL";
 
-/// QEMU's RISC-V virt ACPI emits no TPM2 table, so when a TPM is present we
-/// synthesize one (plus the event-log area it points at), append it to a rebuilt
-/// XSDT, and re-point the RSDP. Returns the log area for Weir to write its log.
+/// QEMU's RISC-V virt ACPI emits no TPM2 table. When a TPM is present, Weir
+/// synthesizes one (plus the event-log area it points at), appends it to a
+/// rebuilt XSDT, and re-points the RSDP. Returns the log area for the event log.
 pub fn injectTpm2(tis_base: u64) ?struct { addr: usize, len: usize } {
     if (rsdp_addr == 0) return null;
     const rsdp_blob = blobByName("etc/acpi/rsdp") orelse return null;
@@ -198,7 +211,7 @@ pub fn injectTpm2(tis_base: u64) ?struct { addr: usize, len: usize } {
 
     // Build the TPM2 table (TCG ACPI, memory-mapped TIS, with a log area).
     // phys == virt here, so base_phys is just the slice addr.
-    _ = tis_base; // TIS base is conveyed via the DSDT device _CRS (River's AML)
+    _ = tis_base; // the DSDT device _CRS (River's AML) carries the TIS base
     const t = poolAlloc(64, 8) orelse return null;
     var tb = almanac.Builder.init(t, @intFromPtr(t.ptr));
     tb.oem_id = OEM_ID.*;
@@ -212,10 +225,10 @@ pub fn injectTpm2(tis_base: u64) ?struct { addr: usize, len: usize } {
         .log_area_start = @intFromPtr(log.ptr),
     }) catch return null;
 
-    // Rebuild the XSDT with one extra entry for the new TPM2 table, preserving the
-    // original's OEM identity. The RSDP's XSDT pointer lives inside the
-    // etc/acpi/tables blob; validate it points there and its declared length fits,
-    // so the entry-copy loop cannot read past the blob on a garbage header.
+    // Rebuild the XSDT with one extra entry for the new TPM2 table. Keep the
+    // original OEM identity. The RSDP's XSDT pointer lives inside the
+    // etc/acpi/tables blob. Validate that it points there and its declared length
+    // fits, so the entry-copy loop cannot read past the blob on a garbage header.
     const tables_blob = blobByName("etc/acpi/tables") orelse return null;
     const tbl_start = @intFromPtr(tables_blob.buf.ptr);
     const tbl_end = tbl_start + tables_blob.buf.len;
@@ -247,7 +260,10 @@ pub fn injectTpm2(tis_base: u64) ?struct { addr: usize, len: usize } {
     writeChecksum(rsdp_buf[0..20], 8); // ACPI 1.0 checksum
     writeChecksum(rsdp_buf[0..36], 32); // extended checksum
 
-    console.printf("[acpi] injected TPM2 table, event log @ {x} ({d} bytes)\n", .{ @intFromPtr(log.ptr), LOG_LEN });
+    console.out.print(
+        "[acpi] injected TPM2 table, event log @ {x} ({d} bytes)\n",
+        .{ @intFromPtr(log.ptr), LOG_LEN },
+    ) catch {};
     return .{ .addr = @intFromPtr(log.ptr), .len = LOG_LEN };
 }
 

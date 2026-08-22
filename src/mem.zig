@@ -1,9 +1,9 @@
 //! Firmware memory layout, derived from a single `ram_base`.
 //!
-//! Every base-relative address is computed here from `ram_base` (the SoC tree's
-//! /memory node, comptime; see soc.zig), so nothing assumes one SoC. build.zig
-//! reads the same tree for the linker base, so layout and link address agree
-//! with no -Dram-base option to keep in sync.
+//! This module computes every base-relative address from `ram_base`. ram_base
+//! comes from the SoC tree's /memory node at comptime. See soc.zig. So nothing
+//! assumes one SoC. build.zig reads the same tree for the linker base. The
+//! layout and the link address agree, with no -Dram-base option to keep in sync.
 
 const soc = @import("soc");
 

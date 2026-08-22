@@ -15,6 +15,9 @@ extern var _data_lma: u8;
 extern var _data_vma: u8;
 extern var _data_end: u8;
 
+// _start is the ELF entry symbol the linker script and the CPU reset vector
+// need by that exact name.
+// zippy:ignore naming_convention
 export fn _start() linksection(".text.boot") callconv(.naked) noreturn {
     asm volatile (
         \\ csrw mie, zero
@@ -29,7 +32,8 @@ export fn _start() linksection(".text.boot") callconv(.naked) noreturn {
 }
 
 export fn fsblMain(hartid: usize, dtb: usize) callconv(.c) noreturn {
-    // Only the boot hart runs the FSBL; others wait for the main firmware's HSM.
+    // Only the boot hart runs the FSBL. The other harts wait for the main
+    // firmware HSM.
     if (hartid != 0) while (true) asm volatile ("wfi");
 
     // XIP: copy initialized .data from its flash load image (_data_lma) into the
@@ -41,7 +45,9 @@ export fn fsblMain(hartid: usize, dtb: usize) callconv(.c) noreturn {
     const dv = @intFromPtr(&_data_vma);
     const de = @intFromPtr(&_data_end);
     if (de > dv) {
-        @memcpy(@as([*]u8, @ptrFromInt(dv))[0 .. de - dv], @as([*]const u8, @ptrFromInt(dl))[0 .. de - dv]);
+        const dst = @as([*]u8, @ptrFromInt(dv))[0 .. de - dv];
+        const src = @as([*]const u8, @ptrFromInt(dl))[0 .. de - dv];
+        @memcpy(dst, src);
     }
 
     // Zero .bss before anything touches it.
