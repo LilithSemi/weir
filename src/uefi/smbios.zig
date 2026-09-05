@@ -84,7 +84,7 @@ pub fn build(ram_bytes: u64) void {
 
     // Type 0 - BIOS Information.
     header(0, 0x18, 0x0000);
-    put8(1); // Vendor -> "Midstall"
+    put8(1); // Vendor -> "Lilith Semiconductor"
     put8(2); // BIOS Version -> "Weir 0.1"
     put16(0); // BIOS starting address segment (n/a)
     put8(3); // BIOS Release Date -> string
@@ -95,11 +95,11 @@ pub fn build(ram_bytes: u64) void {
     put8(1); // System BIOS minor release
     put8(0xff); // EC firmware major (none)
     put8(0xff); // EC firmware minor (none)
-    strings(&.{ "Midstall", "Weir 0.1", "01/01/2026" });
+    strings(&.{ "Lilith Semiconductor", "Weir 0.1", "01/01/2026" });
 
     // Type 1 - System Information.
     header(1, 0x1b, 0x0100);
-    put8(1); // Manufacturer -> "Midstall"
+    put8(1); // Manufacturer -> "Lilith Semiconductor"
     put8(2); // Product Name -> "River"
     put8(3); // Version
     put8(4); // Serial Number
@@ -113,7 +113,7 @@ pub fn build(ram_bytes: u64) void {
     put8(0x06); // Wake-up Type: Power Switch
     put8(5); // SKU Number
     put8(6); // Family
-    strings(&.{ "Midstall", "River", "1.0", "0", "0", "River" });
+    strings(&.{ "Lilith Semiconductor", "River", "1.0", "0", "0", "River" });
 
     // Type 2 - Baseboard.
     header(2, 0x0f, 0x0200);
@@ -127,7 +127,7 @@ pub fn build(ram_bytes: u64) void {
     put16(0x0300); // Chassis Handle
     put8(0x0a); // Board Type: Motherboard
     put8(0); // Number of contained object handles
-    strings(&.{ "Midstall", "River Mainboard", "1.0", "0", "0", "Onboard" });
+    strings(&.{ "Lilith Semiconductor", "River Mainboard", "1.0", "0", "0", "Onboard" });
 
     // Type 3 - Chassis.
     header(3, 0x15, 0x0300);
@@ -145,7 +145,7 @@ pub fn build(ram_bytes: u64) void {
     put8(0); // Number of power cords
     put8(0); // Contained element count
     put8(0); // Contained element record length
-    strings(&.{ "Midstall", "1.0", "0", "0" });
+    strings(&.{ "Lilith Semiconductor", "1.0", "0", "0" });
 
     // Type 4 - Processor Information (SMBIOS 2.6 layout, length 0x2a).
     header(4, 0x2a, 0x0400);
@@ -172,7 +172,7 @@ pub fn build(ram_bytes: u64) void {
     put8(0); // Thread Count: unknown
     put16(0x0004); // Processor Characteristics: 64-bit Capable
     put16(0x0201); // Processor Family 2: RISC-V RV64 (proposed code)
-    strings(&.{ "CPU0", "Midstall", "River", "0", "0", "River-RV64" });
+    strings(&.{ "CPU0", "Lilith Semiconductor", "River", "0", "0", "River-RV64" });
 
     // Type 16 - Physical Memory Array.
     header(16, 0x17, 0x1000);
@@ -212,7 +212,7 @@ pub fn build(ram_bytes: u64) void {
     put8(4); // Serial Number
     put8(5); // Asset Tag
     put8(6); // Part Number
-    strings(&.{ "DIMM 0", "BANK 0", "Midstall", "0", "0", "River-RAM" });
+    strings(&.{ "DIMM 0", "BANK 0", "Lilith Semiconductor", "0", "0", "River-RAM" });
 
     // Type 127 - End-of-Table.
     header(127, 0x04, 0x7f00);

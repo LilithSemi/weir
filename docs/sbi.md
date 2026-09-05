@@ -5,7 +5,7 @@ runs in M-mode and answers the `ecall`s that S-mode makes. The trap handler in
 `src/arch/riscv/trap.zig` routes each `ecall` to `src/sbi/sbi.zig`.
 
 Weir reports SBI specification version 2.0. Its implementation ID is `MWRI`
-("Midstall Weir").
+("Lilith Semiconductor Weir").
 
 ## Extensions
 

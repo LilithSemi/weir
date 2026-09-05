@@ -214,7 +214,7 @@ fn build(dsdt: ?[]const u8) !void {
     const buf = pool[0..qemu.POOL_SIZE];
     const base = qemu.POOL_BASE;
     var b = almanac.Builder.init(buf, base);
-    b.oem_id = "MIDSTL".*;
+    b.oem_id = "LILSMI".*;
     b.oem_table_id = "WEIR    ".*;
     b.creator_id = "WEIR".*;
 

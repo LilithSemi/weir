@@ -7,7 +7,7 @@ Short definitions for the terms used across these docs.
 - **ASD-STE100** - Simplified Technical English, a controlled-English standard from the aerospace and defence industry. Weir writes its docs and comments in it.
 - **cache as RAM** - Using the CPU cache as scratch RAM before DRAM is ready.
 - **CLINT** - Core-Local Interruptor. It provides the machine timer and software interrupts.
-- **Conduit** - Midstall's hardware-abstraction library. Weir gets its drivers from it.
+- **Conduit** - Lilith Semiconductor's hardware-abstraction library. Weir gets its drivers from it.
 - **CSR** - Control and Status Register. A RISC-V processor register.
 - **DDR** - The DRAM main memory, and its double-data-rate interface.
 - **device tree** - A data structure that describes the hardware. Weir reads it at build time. Also DTB.
@@ -15,15 +15,15 @@ Short definitions for the terms used across these docs.
 - **ESP** - EFI System Partition. The FAT partition a UEFI bootloader lives on.
 - **FAT** - File Allocation Table. The filesystem on an ESP.
 - **fdt2ld** - The host tool that generates Weir's linker script from the device tree.
-- **Ferrite** - Midstall's kernel.
+- **Ferrite** - Lilith Semiconductor's kernel.
 - **FSBL** - First-stage boot loader. It trains the DDR and loads the firmware. See [fsbl.md](fsbl.md).
 - **GOP** - Graphics Output Protocol. The UEFI framebuffer protocol.
 - **GPT** - GUID Partition Table. The partition layout the boot manager reads.
-- **Harbor** - Midstall's peripheral IP family, such as the SPI and SDHCI controllers.
+- **Harbor** - Lilith Semiconductor's peripheral IP family, such as the SPI and SDHCI controllers.
 - **hart** - A RISC-V hardware thread.
 - **HSM** - Hart State Management. The SBI extension that starts and stops harts.
 - **initramfs** - The initial RAM filesystem the kernel loads. Also initrd.
-- **IronStyle** - Midstall's Zig coding style.
+- **IronStyle** - Lilith Semiconductor's Zig coding style.
 - **JTAG** - The hardware debug interface. Attach OpenOCD over it.
 - **M-mode** - Machine mode, the highest RISC-V privilege. Weir runs here.
 - **measured boot** - Hashing each boot stage into a TPM. See [measured-boot.md](measured-boot.md).
@@ -35,7 +35,7 @@ Short definitions for the terms used across these docs.
 - **PE** - Portable Executable. The format of a UEFI application.
 - **PHY** - The physical-layer block of the DDR controller. The FSBL trains it.
 - **Pmod** - A Digilent peripheral-module connector. The reference SD card sits on one.
-- **River** - Midstall's RISC-V SoC. Creek V1 and Delta V1 are versions.
+- **River** - Lilith Semiconductor's RISC-V SoC. Creek V1 and Delta V1 are versions.
 - **RTC** - Real-time clock. Weir reads the wall-clock time from it.
 - **S-mode** - Supervisor mode. The OS runs here.
 - **SBI** - Supervisor Binary Interface. Weir provides it to the OS. See [sbi.md](sbi.md).
@@ -50,4 +50,4 @@ Short definitions for the terms used across these docs.
 - **UART** - The serial port. Weir's console.
 - **UEFI** - Unified Extensible Firmware Interface. The boot environment Weir presents to a bootloader or the OS. See [uefi.md](uefi.md).
 - **XIP** - Execute in place. Running code directly from flash.
-- **zippy** - Midstall's linter for Zig.
+- **zippy** - Lilith Semiconductor's linter for Zig.

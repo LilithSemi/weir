@@ -194,7 +194,7 @@ fn writeChecksum(buf: []u8, csum_index: usize) void {
     buf[csum_index] = almanac.checksum.compute(buf);
 }
 
-const OEM_ID = "MIDSTL";
+const OEM_ID = "LILSMI";
 
 /// QEMU's RISC-V virt ACPI emits no TPM2 table. When a TPM is present, Weir
 /// synthesizes one (plus the event-log area it points at), appends it to a

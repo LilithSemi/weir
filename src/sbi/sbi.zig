@@ -169,7 +169,7 @@ fn forEachHart(mask_in: usize, base_hart: usize, comptime run: fn (usize) void) 
 fn base(fid: usize, args: [6]usize) Ret {
     return switch (fid) {
         0 => .{ .val = 0x02000000 }, // spec version 2.0
-        1 => .{ .val = 0x4D575249 }, // impl id ("MWRI", Midstall Weir)
+        1 => .{ .val = 0x4D575249 }, // impl id ("MWRI", Lilith Semiconductor Weir)
         2 => .{ .val = 1 }, // impl version
         3 => .{ .val = probe(args[0]) }, // probe_extension
         4 => .{ .val = csr.read("mvendorid") }, // JEDEC vendor ID

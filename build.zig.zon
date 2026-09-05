@@ -5,12 +5,12 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .conduit = .{
-            .url = "git+https://github.com/Midstall/conduit#1d1a9d4f2ecda4fd91f571a63e816727c1a85fad",
-            .hash = "conduit-0.1.0-R_mFrKEiBQCsP4aH4NpICkETF0qb408ouijHM_x5VH8c",
+            .url = "git+https://git.lilithsemi.com/LilithSemi/conduit.git#c94686a4c7b55e6fc630774336a460594834904a",
+            .hash = "conduit-0.1.0-R_mFrLUiBQBWDBOcDzrJAQ7IJ_XtXsmuiTKcHHPx8OGM",
         },
         .dtree = .{
-            .url = "git+https://github.com/Midstall/dtree#974e557da3c6426eaf2b3284c26ff8740163d954",
-            .hash = "dtree-0.1.0-76to8JyYAABD4L0wHIrSVlX-2X-5f72L7Odt0PvXrJeu",
+            .url = "git+https://git.lilithsemi.com/LilithSemi/dtree.git#1a37e566bb82194acfd7d7d5514615fe4fe13c68",
+            .hash = "dtree-0.1.0-76to8Fy8AADLnQuIRRFtYugky-X4UAtcO74DyS_9Tmp3",
         },
     },
     .paths = .{""},

@@ -53,7 +53,7 @@ var con_in: uefi.protocol.SimpleTextInput = undefined; // zippy:ignore unsafe_un
 var config_table: [16]tables.ConfigurationTable = undefined;
 var config_count: usize = 0;
 var image_marker: u8 = 0;
-var vendor = std.unicode.utf8ToUtf16LeStringLiteral("Midstall Weir").*;
+var vendor = std.unicode.utf8ToUtf16LeStringLiteral("Lilith Semiconductor Weir").*;
 
 // State an EFI app (the Linux kernel stub) needs: its loaded image, the boot
 // hartid, the device tree, and a kernel command line. prepare() fills the
