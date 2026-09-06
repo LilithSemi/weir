@@ -13,6 +13,7 @@ const console = @import("../console/console.zig");
 const soc = @import("soc");
 const qemu = @import("qemu.zig");
 const aml = @import("aml.zig");
+const madt = @import("madt.zig");
 const conduit = @import("conduit");
 
 /// Build the table set referencing `dsdt` (raw AML) and report a summary. No
@@ -39,31 +40,56 @@ fn spcrBody(uart_base: u64) [44]u8 {
     return b;
 }
 
-/// MADT body: local interrupt controller address and flags, then one RINTC per
-/// hart and the PLIC. Single hart for now (creek/virt -smp 1).
-fn madtBody(hart_id: u64, plic_base: u64, plic_size: u32) [80]u8 {
-    var b = [_]u8{0} ** 80;
-    // b[0..4] local interrupt controller address, b[4..8] flags: both 0.
-    // RINTC (type 0x18) at b[8..44].
-    b[8] = 0x18; // type: RISC-V INTC
-    b[9] = 36; // length
-    b[10] = 1; // version
-    std.mem.writeInt(u32, b[12..16], 1, .little); // flags: enabled
-    std.mem.writeInt(u64, b[16..24], hart_id, .little);
-    // b[24..28] ACPI processor UID, b[28..32] external interrupt controller id,
-    // b[32..40] IMSIC base, b[40..44] IMSIC size: all 0 (a PLIC system).
-    // PLIC (type 0x1B) at b[44..80].
-    b[44] = 0x1b; // type: PLIC
-    b[45] = 36; // length
-    b[46] = 1; // version
-    b[47] = 0; // PLIC ID
-    // b[48..56] hardware id: 0.
-    std.mem.writeInt(u16, b[56..58], 1023, .little); // total external sources
-    std.mem.writeInt(u16, b[58..60], 7, .little); // max priority
-    std.mem.writeInt(u32, b[64..68], plic_size, .little); // register space size
-    std.mem.writeInt(u64, b[68..76], plic_base, .little); // PLIC address
-    // b[76..80] global system interrupt vector base: 0.
-    return b;
+// The PLIC's ACPI identity. One PLIC exists on every River SoC today, so it is
+// PLIC 0 and it owns the global system interrupts from 0 up. `plic_gsi_base`
+// must equal the `_GSB` the DSDT gives the same PLIC (see buildDsdt below): an
+// OS matches the two to attach the MADT record to the DSDT device, and without
+// a match it never probes the PLIC at all.
+const plic_id: u8 = 0;
+const plic_gsi_base: u32 = 0;
+
+// Highest priority the Harbor PLIC accepts. It has 3 priority bits, and the
+// device tree has no property for it, so it is stated here.
+const plic_max_priority: u16 = 7;
+
+// The PLIC's hardware ID, the same string as the DSDT device's _HID. The field
+// is informational and no OS driver reads it, but a value is more use than zero
+// to anyone dumping the table.
+const plic_hw_id = "RSCV0001".*;
+
+// The contexts the PLIC declares, in the layout the MADT builder wants.
+const plic_contexts_arr: [soc.plic_contexts.len]madt.Context = blk: {
+    var arr: [soc.plic_contexts.len]madt.Context = undefined;
+    for (soc.plic_contexts, 0..) |c, i| arr[i] = .{ .hart_id = c.hart_id, .cause = c.cause };
+    break :blk arr;
+};
+
+// One RINTC per hart, each naming the PLIC context that drives that hart's
+// supervisor external interrupt. Weir owns the machine context, so it is never
+// named here. Both the hart list and the context list come from the device
+// tree, so they describe the interrupt wiring the SoC really has.
+const madt_harts: [soc.hart_count]madt.Hart = blk: {
+    var arr: [soc.hart_count]madt.Hart = undefined;
+    for (soc.harts, 0..) |hart, i| arr[i] = .{
+        .hart_id = hart,
+        .uid = @intCast(i),
+        .context = madt.supervisorContext(&plic_contexts_arr, hart),
+    };
+    break :blk arr;
+};
+
+var madt_buf: [madt.bodyLen(soc.hart_count)]u8 = undefined;
+
+fn madtBody() []const u8 {
+    return madt.build(&madt_buf, &madt_harts, .{
+        .id = plic_id,
+        .hw_id = plic_hw_id,
+        .num_irqs = @intCast(soc.plic_ndev),
+        .max_priority = plic_max_priority,
+        .size = @intCast(soc.plic_size),
+        .base = soc.plic_base,
+        .gsi_base = plic_gsi_base,
+    });
 }
 
 /// Build the RHCT body into `buf`: the hart timebase, then an ISA-string node,
@@ -173,7 +199,7 @@ fn buildDsdt() []u8 {
                 // native HID + _GSB is what registers the irqchip.
                 .intc => {
                     hid = intcHid(m);
-                    gsb = 0;
+                    gsb = plic_gsi_base;
                 },
                 // The 16550 UART: the kernel's RISC-V 8250 ACPI driver binds
                 // RSCV0003 and reads the baud clock from _DSD. (PRP0001/of_serial
@@ -229,12 +255,18 @@ fn build(dsdt: ?[]const u8) !void {
     // that never registers and the disks never appear.
     const dsdt_phys: u64 = if (dsdt) |d| try b.addRaw(d) else try b.addTable("DSDT", buildDsdt(), 2);
 
-    const fadt_phys = try b.fadt(.{ .dsdt_phys = dsdt_phys, .hw_reduced = true });
+    // ACPI 6.6 (revision 6, minor version 6). It is the first revision that
+    // defines the RISC-V RINTC and PLIC structures the MADT below carries, so
+    // an older claimed revision would not describe the table Weir writes.
+    const fadt_phys = try b.fadt(.{
+        .dsdt_phys = dsdt_phys,
+        .hw_reduced = true,
+        .minor_version = 6,
+    });
     // The provided AML is only the DSDT, so build the tables an OS needs to run
     // in ACPI mode: MADT (harts + PLIC), RHCT (hart ISA/timebase), and SPCR (the
     // console). Without these an OS that sees the RSDP finds no CPUs and hangs.
-    const madt = madtBody(0, soc.plic_base, @intCast(soc.plic_size));
-    const madt_phys = try b.addTable("APIC", &madt, 6);
+    const madt_phys = try b.addTable("APIC", madtBody(), madt.revision);
     var rhct_buf: [512]u8 = undefined;
     const rhct = buildRhct(&rhct_buf, soc.timebase_hz, soc.cpu_isa, soc.mmu_type);
     const rhct_phys = try b.addTable("RHCT", rhct, 1);
@@ -251,6 +283,10 @@ fn build(dsdt: ?[]const u8) !void {
     console.out.print(
         "[acpi] MADT @ {x}, RHCT @ {x}, SPCR @ {x} (16550 @ {x}, PLIC @ {x})\n",
         .{ madt_phys, rhct_phys, spcr_phys, soc.uart_base, soc.plic_base },
+    ) catch {};
+    console.out.print(
+        "[acpi] MADT: {d} hart(s), PLIC {d} sources, GSI base {d}, S-context {?d}\n",
+        .{ madt_harts.len, soc.plic_ndev, plic_gsi_base, madt_harts[0].context },
     ) catch {};
 
     if (dsdt) |d| {

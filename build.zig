@@ -189,6 +189,40 @@ pub fn build(b: *std.Build) void {
     const install_packed = b.addInstallBinFile(packed_bin, "weir-firmware-packed.bin");
     b.getInstallStep().dependOn(&install_packed.step);
 
+    // `zig build test` runs the unit tests of the platform-independent parts.
+    // They build for the host, so only modules with no hardware or SoC imports
+    // belong here. src/acpi/madt.zig is one: it lays out MADT bytes and nothing
+    // else, so its tests pin the table an OS reads.
+    const test_step = b.step("test", "Run the unit tests");
+    const madt_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/acpi/madt.zig"),
+            .target = b.graph.host,
+            .optimize = optimize,
+        }),
+    });
+    test_step.dependOn(&b.addRunArtifact(madt_tests).step);
+
+    // src/soc.zig resolves every SoC parameter at comptime from the embedded
+    // device tree. Built for the host against the same tree and the same
+    // conduit, its tests exercise the exact comptime path the firmware uses, so
+    // a tree that stops declaring something fails `zig build test` and not a
+    // board. It needs a host build of conduit, because the firmware one is
+    // riscv64.
+    const conduit_host = b.dependency("conduit", .{
+        .target = b.graph.host,
+        .optimize = optimize,
+    }).module("conduit");
+    const soc_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/soc.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    soc_test_mod.addImport("conduit", conduit_host);
+    soc_test_mod.addImport("build_options", soc_opts_mod);
+    if (dtb_path) |p| soc_test_mod.addAnonymousImport("soc_dtb", .{ .root_source_file = p });
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = soc_test_mod })).step);
+
     // `zig build qemu` boots the firmware under QEMU's virt machine.
     const run = b.addSystemCommand(&.{
         "qemu-system-riscv64",

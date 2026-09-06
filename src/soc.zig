@@ -92,11 +92,45 @@ const sdhci_ids = [_][]const u8{ "harbor,sdhci", "harbor,sdio" };
 const virtio_ids = [_][]const u8{"virtio,mmio"};
 
 pub const uart_base: usize = if (firstMmio(.uart)) |r| @intCast(r.base) else 0x10000000;
+// The UART's own baud clock, which console.zig divides to get the divisor. This
+// one IS a device clock, so the node's `clock-frequency` is the right source.
+// The default is a guess for a tree that omits it, and a guess here sets every
+// baud rate wrong. A board declares the rate instead of relying on it.
 pub const uart_clock: usize = if (firstClockHz(.uart)) |hz| @intCast(hz) else 24000000;
 pub const clint_base: usize = if (firstMmio(.timer)) |r| @intCast(r.base) else 0x2000000;
-// CLINT mtime tick rate (the RISC-V timebase-frequency). Used to turn elapsed
-// timer ticks into seconds for the software wall clock. QEMU virt runs at 10 MHz.
-pub const timebase_hz: u64 = if (firstClockHz(.timer)) |hz| hz else 10_000_000;
+
+/// The architectural timebase: the rate the RISC-V `time` counter (CLINT mtime)
+/// increments at. conduit reads it from the platform description, never from a
+/// timer device's own clock. The two are different things, and a CLINT normally
+/// declares no clock of its own, so a device-class lookup finds nothing.
+///
+/// Null means the description does not say. Weir then has to pick a value, and
+/// `timebase_known` reports that it did.
+const timebase_from_platform: ?u64 = if (has_dt) readTimebaseHz() else null;
+
+/// True when `timebase_hz` came from the platform description. False means
+/// `timebase_hz` is the QEMU-virt default, which is wrong on every other board:
+/// every delay Weir computes is then scaled by the ratio, and the timebase Weir
+/// reports to the OS in the ACPI RHCT is wrong by the same ratio. platform.zig
+/// says so on the console at boot.
+pub const timebase_known: bool = timebase_from_platform != null;
+
+// QEMU's virt machine runs mtime at 10 MHz. No other platform is promised that
+// rate, so this default is correct for QEMU virt and for nothing else. A board
+// declares `timebase-frequency` on its cpu node instead of relying on it.
+const qemu_virt_timebase_hz: u64 = 10_000_000;
+
+/// Ticks per second of the CLINT mtime counter. Every computed delay and every
+/// reported time scales with it, so a wrong value is a proportional error in
+/// all of them.
+pub const timebase_hz: u64 = timebase_from_platform orelse qemu_virt_timebase_hz;
+
+fn readTimebaseHz() ?u64 {
+    @setEvalBranchQuota(4_000_000);
+    var rd = conduit.dtree.Reader.initBuffer(@embedFile("soc_dtb")) catch return null;
+    var be = conduit.backend.dtree.DtBackend.init(&rd);
+    return conduit.Builder.timebaseHz(&be);
+}
 
 // A real-time clock, if the platform has one. 0 base means none, and time.zig
 // falls back to a software clock from the UNIX epoch.
@@ -115,6 +149,181 @@ pub const tpm_base: usize = if (tpm_mmio) |r| @intCast(r.base) else 0x04000000;
 const plic_mmio = firstMmio(.intc);
 pub const plic_base: usize = if (plic_mmio) |r| @intCast(r.base) else 0x0c000000;
 pub const plic_size: usize = if (plic_mmio) |r| @intCast(r.size) else 0x0400_0000;
+
+// The PLIC's source count and its contexts, both read from the PLIC node of the
+// device tree. The ACPI MADT reports them, and on the ACPI path they are the
+// only place an OS can get them from: the DSDT carries the register window and
+// the GSI base, never the source count or the context map.
+
+/// Number of external interrupt sources the PLIC implements (`riscv,ndev`). An
+/// OS sizes its interrupt domain from it. Falls back to the architectural
+/// maximum when the tree does not say, which is safe but wasteful.
+pub const plic_ndev: u32 = if (has_dt) readPlicNdev() else 1023;
+
+/// One PLIC context. The PLIC node's `interrupts-extended` lists the contexts
+/// in context order, so the index into `plic_contexts` is the context number
+/// the PLIC decodes. Each entry names the hart it interrupts and the local
+/// interrupt cause it drives (11 = machine external, 9 = supervisor external).
+pub const PlicContext = struct { hart_id: u64, cause: u32 };
+
+const plic_context_count: usize = if (has_dt) countPlicContexts() else 0;
+const plic_contexts_arr: [plic_context_count]PlicContext =
+    if (has_dt) readPlicContexts(plic_context_count) else .{};
+
+/// Every PLIC context, in context order. Empty when no tree is embedded.
+pub const plic_contexts: []const PlicContext = &plic_contexts_arr;
+
+/// Number of harts in the tree. At least one: a tree with no cpu node is
+/// broken, and Weir is running, so a hart exists.
+pub const hart_count: usize = if (has_dt) countHarts() else 1;
+
+const harts_arr: [hart_count]u64 = if (has_dt) readHarts(hart_count) else .{0};
+
+/// Every hart id, in device-tree order. The first is the boot hart.
+pub const harts: []const u64 = &harts_arr;
+
+/// A device-tree address cell pair, either one or two cells wide.
+fn readCells(v: []const u8) u64 {
+    if (v.len >= 8) return std.mem.readInt(u64, v[0..8], .big);
+    if (v.len >= 4) return std.mem.readInt(u32, v[0..4], .big);
+    return 0;
+}
+
+/// The raw value of `want` on the PLIC node, or null.
+///
+/// The PLIC is found by its `compatible`, not by its node name, because the
+/// name differs between generators (`plic@`, `plic-1-0-0@`). Properties can
+/// come in any order, so the value is only accepted once the node ends and the
+/// compatible is known.
+fn plicProp(want: []const u8) ?[]const u8 {
+    @setEvalBranchQuota(8_000_000);
+    var rd = conduit.dtree.Reader.initBuffer(@embedFile("soc_dtb")) catch return null;
+    var it = rd.nodeIterator();
+    var depth: usize = 0;
+    var is_plic = false;
+    var value: ?[]const u8 = null;
+    while (it.next() catch return null) |node| switch (node) {
+        // Do not reset while inside the PLIC's own subtree, so a child node
+        // cannot drop the properties collected from the PLIC itself.
+        .begin => |bg| if (!is_plic or bg.depth <= depth) {
+            depth = bg.depth;
+            is_plic = false;
+            value = null;
+        },
+        // A property reports the depth of its node plus one.
+        .prop => |p| if (p.depth == depth + 1) {
+            if (std.mem.eql(u8, p.name, "compatible") and
+                std.mem.indexOf(u8, p.value, "plic") != null) is_plic = true;
+            if (std.mem.eql(u8, p.name, want)) value = p.value;
+        },
+        .end => |e| if (e.depth == depth and is_plic) return value,
+    };
+    return null;
+}
+
+// A PLIC decodes sources 1 to 1023, so 1023 is both the architectural maximum
+// and the safe fallback when the tree does not say.
+const plic_max_sources: u32 = 1023;
+
+fn readPlicNdev() u32 {
+    const v = plicProp("riscv,ndev") orelse return plic_max_sources;
+    if (v.len < 4) return plic_max_sources;
+    return @min(std.mem.readInt(u32, v[0..4], .big), plic_max_sources);
+}
+
+// `interrupts-extended` holds one phandle plus one interrupt cell per context.
+// The hart local interrupt controller declares `#interrupt-cells = <1>`, so an
+// entry is 8 bytes.
+const plic_context_entry_len = 8;
+
+fn countPlicContexts() usize {
+    @setEvalBranchQuota(8_000_000);
+    const v = plicProp("interrupts-extended") orelse return 0;
+    return v.len / plic_context_entry_len;
+}
+
+fn readPlicContexts(comptime n: usize) [n]PlicContext {
+    @setEvalBranchQuota(8_000_000);
+    var arr: [n]PlicContext = undefined;
+    const v = plicProp("interrupts-extended") orelse return arr;
+    for (0..n) |i| {
+        const e = v[i * plic_context_entry_len ..][0..plic_context_entry_len];
+        arr[i] = .{
+            .hart_id = phandleToHart(std.mem.readInt(u32, e[0..4], .big)) orelse 0,
+            .cause = std.mem.readInt(u32, e[4..8], .big),
+        };
+    }
+    return arr;
+}
+
+/// The hart that owns the local interrupt controller with this phandle. The
+/// controller is a child of the cpu node, and the cpu node's `reg` is the hart
+/// id, so the walk carries the last cpu node seen.
+fn phandleToHart(phandle: u32) ?u64 {
+    @setEvalBranchQuota(8_000_000);
+    var rd = conduit.dtree.Reader.initBuffer(@embedFile("soc_dtb")) catch return null;
+    var it = rd.nodeIterator();
+    var cpu_depth: ?usize = null;
+    var hart: u64 = 0;
+    while (it.next() catch return null) |node| switch (node) {
+        .begin => |bg| {
+            if (std.mem.startsWith(u8, bg.name, "cpu@")) {
+                cpu_depth = bg.depth;
+                hart = 0;
+            } else if (cpu_depth) |d| {
+                if (bg.depth <= d) cpu_depth = null;
+            }
+        },
+        .prop => |p| if (cpu_depth) |d| {
+            if (p.depth == d + 1 and std.mem.eql(u8, p.name, "reg")) hart = readCells(p.value);
+            if (p.depth == d + 2 and std.mem.eql(u8, p.name, "phandle") and p.value.len >= 4 and
+                std.mem.readInt(u32, p.value[0..4], .big) == phandle) return hart;
+        },
+        .end => {},
+    };
+    return null;
+}
+
+fn countHarts() usize {
+    @setEvalBranchQuota(8_000_000);
+    var rd = conduit.dtree.Reader.initBuffer(@embedFile("soc_dtb")) catch return 1;
+    var it = rd.nodeIterator();
+    var n: usize = 0;
+    while (it.next() catch return 1) |node| switch (node) {
+        .begin => |bg| if (std.mem.startsWith(u8, bg.name, "cpu@")) {
+            n += 1;
+        },
+        .prop, .end => {},
+    };
+    return if (n == 0) 1 else n;
+}
+
+fn readHarts(comptime n: usize) [n]u64 {
+    @setEvalBranchQuota(8_000_000);
+    var arr: [n]u64 = @splat(0);
+    var rd = conduit.dtree.Reader.initBuffer(@embedFile("soc_dtb")) catch return arr;
+    var it = rd.nodeIterator();
+    var i: usize = 0;
+    var cpu_depth: ?usize = null;
+    while (it.next() catch return arr) |node| switch (node) {
+        .begin => |bg| {
+            if (std.mem.startsWith(u8, bg.name, "cpu@") and i < n) {
+                cpu_depth = bg.depth;
+            } else if (cpu_depth) |d| {
+                if (bg.depth <= d) cpu_depth = null;
+            }
+        },
+        .prop => |p| if (cpu_depth) |d| {
+            if (p.depth == d + 1 and std.mem.eql(u8, p.name, "reg")) {
+                arr[i] = readCells(p.value);
+                i += 1;
+                cpu_depth = null;
+            }
+        },
+        .end => {},
+    };
+    return arr;
+}
 
 // The boot hart's ISA string, read from the device tree (/cpus/cpu@N's
 // `riscv,isa`) for the ACPI RHCT. An OS validates it against the hardware, so it
@@ -197,6 +406,9 @@ pub const ddr_train_base: usize =
 
 // SD/MMC host, River's block device. Absent on creek. 0 means none.
 pub const sdhci_base: usize = if (firstMmioId(.block, &sdhci_ids)) |r| @intCast(r.base) else 0;
+// The host controller's input clock. The SD clock divider derives from it, so a
+// wrong value clocks the card by the same ratio. 50 MHz is a guess for a tree
+// that omits `clock-frequency`, not a property of any board here.
 pub const sdhci_freq: u32 =
     if (firstClockHzId(.block, &sdhci_ids)) |hz| @intCast(hz) else 50_000_000;
 
@@ -299,3 +511,40 @@ const sdhci_controllers_arr: [sdhci_count]SdhciController = blk: {
 
 /// Every native SD/MMC host, in device-tree order.
 pub const sdhci_controllers: []const SdhciController = &sdhci_controllers_arr;
+
+// These run on the host through `zig build test`, over the same embedded tree
+// and the same comptime path the firmware uses.
+
+test "the embedded device tree supplies the architectural timebase" {
+    // Regression: the CLINT node carries no `clock-frequency`, so the timebase
+    // used to be looked up on the timer device class, find nothing, and fall
+    // silently to the QEMU-virt default. Every UEFI Stall then ran short and the
+    // ACPI RHCT reported the wrong rate. A tree Weir is built against must
+    // declare the timebase, and Weir must read it.
+    if (!has_dt) return error.SkipZigTest;
+    try std.testing.expect(timebase_known);
+    try std.testing.expect(timebase_hz > 0);
+}
+
+test "with no platform description the timebase is the QEMU virt rate, and says so" {
+    if (has_dt) return error.SkipZigTest;
+    try std.testing.expect(!timebase_known);
+    try std.testing.expectEqual(@as(u64, 10_000_000), timebase_hz);
+}
+
+test "a native SD host declares its own input clock" {
+    // Same shape as the timebase defect: a missing `clock-frequency` silently
+    // becomes 50 MHz, and the SD clock divider is then wrong by that ratio.
+    if (sdhci_count == 0) return error.SkipZigTest;
+    const declared = firstClockHzId(.block, &sdhci_ids) orelse return error.SdHostHasNoClock;
+    try std.testing.expectEqual(declared, @as(u64, sdhci_freq));
+}
+
+test "the uart clock comes from the uart node, not from a default" {
+    // `uart_clock` uses the device-class clock lookup that the timebase must
+    // not use. That is correct here: the rate belongs to the UART, and the
+    // ns16550a node declares it.
+    if (!has_dt) return error.SkipZigTest;
+    try std.testing.expect(firstClockHz(.uart) != null);
+    try std.testing.expectEqual(firstClockHz(.uart).?, @as(u64, uart_clock));
+}

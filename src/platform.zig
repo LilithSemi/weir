@@ -26,6 +26,13 @@ pub fn report() void {
     console.out.print("[plat] uart @ {x}, clint @ {x}, ram @ {x} (+{x}), flash @ {x}\n", .{
         soc.uart_base, soc.clint_base, soc.ram_base, soc.ram_size, soc.flash_base,
     }) catch {};
+    console.out.print("[plat] timebase {d} Hz\n", .{soc.timebase_hz}) catch {};
+    // A guessed timebase scales every delay Weir computes and the rate it
+    // reports to the OS, so it never passes silently.
+    if (!soc.timebase_known) console.out.writeAll(
+        "[plat] WARNING: no timebase-frequency in the platform description. " ++
+            "Using the QEMU virt rate, which is wrong on real hardware.\n",
+    ) catch {};
 }
 
 pub fn uartBase() usize {
