@@ -21,12 +21,36 @@ const std = @import("std");
 const cfg = @import("config.zig");
 const ddr_train = @import("ddr_train.zig");
 
+/// The top-of-array probe addresses, as a pure function of the usable DRAM
+/// range. `size` must already exclude any knob window (the device tree's
+/// size does, on a `train=runtime` build), so `top` never lands inside it.
+fn memtestBounds(base: usize, size: usize) struct { top: usize, near_top: usize } {
+    const top = base + size;
+    return .{ .top = top, .near_top = top - 0x100 };
+}
+
+test "memtest bounds stay clear of a 128 MB OrangeCrab knob window" {
+    const base: usize = 0x90000000;
+    const full_size: usize = 128 * 1024 * 1024;
+    const window_size: usize = 0x1000;
+    const window_base = base + full_size - window_size;
+    // train=runtime: the device tree's size already excludes the window.
+    const bounds = memtestBounds(base, full_size - window_size);
+    try std.testing.expect(bounds.top <= window_base);
+    try std.testing.expect(bounds.near_top < window_base);
+}
+
 /// Write and read back known patterns across the DRAM array. Returns true when
 /// every check matches. Three passes cover the ways the boot loader uses DRAM:
 /// sequential words at the base, 64-bit read-after-write at the low and high
 /// ends of the window, and a nested push/pop near the top (the stack region).
 pub fn memtest(con: *std.Io.Writer) bool {
     const b = cfg.dram_base;
+    // Top of the usable array. On a `train=runtime` build the device tree's
+    // size already excludes the knob window, so this never probes it.
+    const bounds = memtestBounds(b, cfg.dram_size);
+    const top = bounds.top;
+    const near_top = bounds.near_top;
     // (1) sequential 32-bit words at the base
     var e1: u32 = 0;
     var i: u32 = 0;
@@ -36,9 +60,10 @@ pub fn memtest(con: *std.Io.Writer) bool {
         const got = @as(*volatile u32, @ptrFromInt(b + i * 4)).*;
         if (got != (0xC0DE0000 | i)) e1 += 1;
     }
-    // (2) 64-bit read-after-write at LOW + HIGH addresses (top of 128MB = stack region)
+    // (2) 64-bit read-after-write at LOW + HIGH addresses (near the top of
+    // the usable array, the stack region)
     var e2: u32 = 0;
-    const addrs = [_]usize{ b, b + 0x1000, b + 0x04000000, b + 0x07FF_FF00, b + 0x07FF_FFF8 };
+    const addrs = [_]usize{ b, b + 0x1000, b + 0x04000000, near_top, top - 8 };
     for (addrs) |a| {
         const v: u64 = 0xDEADBEEF_00000000 | @as(u64, @intCast(a & 0xFFFFFFFF));
         @as(*volatile u64, @ptrFromInt(a)).* = v;
@@ -46,7 +71,7 @@ pub fn memtest(con: *std.Io.Writer) bool {
     }
     // (3) nested push/pop (stack pattern) near the top of the window
     var e3: u32 = 0;
-    var sp: usize = b + 0x07FF_FF00;
+    var sp: usize = near_top;
     var vals: [16]u64 = undefined;
     var k: usize = 0;
     while (k < 16) : (k += 1) {

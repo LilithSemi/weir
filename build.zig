@@ -223,6 +223,66 @@ pub fn build(b: *std.Build) void {
     if (dtb_path) |p| soc_test_mod.addAnonymousImport("soc_dtb", .{ .root_source_file = p });
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = soc_test_mod })).step);
 
+    // src/fsbl/ddr_train.zig holds the runtime DDR training engine: device-tree
+    // parsing, the leveling-window search, and the hardware register access.
+    // `refAllDecls` in the file's own test block forces the compiler to
+    // semantically analyze every declaration (trainController, sweep2D,
+    // scanClkSel, ...), not only the ones a `test` block happens to call
+    // directly. Otherwise a compile-time regression in an uncalled function
+    // would pass `zig build test` silently.
+    //
+    // The one test that needs a real embedded training node
+    // (`parseTrainingNode reads the creek runtime training node`) gets a
+    // synthetic fixture DTB, built by `gen-test-dtb` entirely in Zig via
+    // `dtree.Builder` (no device-tree compiler in the build graph, matching
+    // the zero-external-tool rule).
+    const gen_test_dtb = b.addExecutable(.{
+        .name = "gen-test-dtb",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/gen_test_dtb.zig"),
+            .target = b.graph.host,
+            .optimize = .ReleaseFast,
+            .imports = &.{
+                .{ .name = "dtree", .module = dtree_host },
+            },
+        }),
+    });
+    const run_gen_test_dtb = b.addRunArtifact(gen_test_dtb);
+    const test_dtb = run_gen_test_dtb.addOutputFileArg("train_test.dtb");
+
+    // A dedicated options module: `has_test_dtb` is true here (so the
+    // DTB-fixture test runs instead of skipping) but `has_dtb` stays false,
+    // since this module needs only the synthetic training node, not a real
+    // SoC tree. Keeping it separate from `soc_opts_mod` means the real FSBL
+    // build is untouched by this test-only fixture.
+    const ddr_train_test_opts = b.addOptions();
+    ddr_train_test_opts.addOption(bool, "has_dtb", false);
+    ddr_train_test_opts.addOption(bool, "has_test_dtb", true);
+
+    const ddr_train_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/fsbl/ddr_train.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    ddr_train_test_mod.addImport("conduit", conduit_host);
+    ddr_train_test_mod.addImport("fsbl_options", ddr_train_test_opts.createModule());
+    ddr_train_test_mod.addAnonymousImport("train_test_dtb", .{ .root_source_file = test_dtb });
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = ddr_train_test_mod })).step);
+
+    // src/fsbl/ddr.zig: memtest and the train=hw/train=runtime dispatch. Built
+    // for the host against the same `soc_opts_mod` the real FSBL build uses
+    // for `fsbl_options` (both just carry `has_dtb`), so memtestBounds (a pure
+    // function of the usable DRAM range) is tested without a real device tree.
+    const ddr_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/fsbl/ddr.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    ddr_test_mod.addImport("soc", soc_test_mod);
+    ddr_test_mod.addImport("conduit", conduit_host);
+    ddr_test_mod.addImport("fsbl_options", soc_opts_mod);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = ddr_test_mod })).step);
+
     // `zig build qemu` boots the firmware under QEMU's virt machine.
     const run = b.addSystemCommand(&.{
         "qemu-system-riscv64",

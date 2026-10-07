@@ -15,6 +15,11 @@ pub const uart_divisor: u16 = @intCast(soc.uart_clock / 115200);
 /// Where the main Weir image runs from once DRAM is up (its link base).
 pub const dram_base: usize = soc.ram_base;
 
+/// Usable DRAM size from the device tree. On a `train=runtime` build this
+/// already excludes the knob window at the top of the array, so
+/// `dram_base + dram_size` is the first byte memtest must not touch.
+pub const dram_size: usize = soc.ram_size;
+
 /// Memory-mapped (XIP) base of the SPI flash holding the main image.
 pub const flash_base: usize = soc.flash_base;
 

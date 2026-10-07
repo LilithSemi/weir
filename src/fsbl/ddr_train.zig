@@ -17,15 +17,33 @@
 //!   0x00 WLEVEL   per-lane write-leveling  (feedback = map)
 //!   0x08 ODELAY   per-lane write tap 0..31 (feedback = pattern)
 //!   0x10 IDELAY   per-lane read tap 0..31  (feedback = pattern)
-//!   0x18 BITSLIP  per-lane bitslip 0..7    (feedback = pattern, a 1-bit level)
+//!   0x18 BITSLIP  per-lane bitslip 0..15   (feedback = pattern, one strobe per APPLY)
 //!   0x20 CTL  (wo) bit0 SET, bit1 LOAD/APPLY, bits[11:8] lane selector
-//!   0x28 STATUS (ro) bit0 BUSY
+//!   0x28 STATUS (ro) bit0 BUSY, bit1 cal_failed (self-training controller only)
 //!   0x30 CAP  (ro) bit0 active, bits[7:4] lanes, bits[15:8] tapMax, bits[19:16] slipMax
+//!   0x38 RDCLKSEL per-lane read clock select 0..7 (ECP5 only, feedback = pattern)
 //!
 //! The knob protocol is uniform. Write the tap value to the knob register, put the
 //! lane in CTL[11:8], pulse CTL SET, pulse CTL LOAD/APPLY, then poll STATUS.BUSY
-//! until it clears. BITSLIP is a 1-bit level in the RTL, so the engine reaches a
-//! count of N with N repeated APPLY pulses.
+//! until it clears. BITSLIP is one strobe per APPLY in the RTL, not a held level,
+//! so the engine reaches a count of N with N repeated APPLY pulses.
+//!
+//! An ECP5 build pairs the bitslip knob with a read-clk-sel knob. The engine then
+//! runs a 2D search instead of sweeping each alone: for every bitslip position it
+//! scans read-clk-sel and scores the position by its pass count, then centres
+//! read-clk-sel at the highest-scoring position (first wins a tie). This is the
+//! LiteX BIOS `sdram_read_leveling` rule, the same one the hardware FSM runs for
+//! `train=hw` on an ECP5 PHY. A Xilinx build has no read-clk-sel knob, so bitslip
+//! sweeps alone as before.
+//!
+//! The controller's STATUS.cal_failed bit can go high after the sweep on a
+//! self-training controller. The engine checks it and halts with a fatal
+//! message rather than trusting a miscalibrated array.
+//!
+//! Every register access goes through a `bus: anytype` parameter instead of a
+//! bare pointer: the firmware wires in the real MMIO bus, and a test wires in
+//! a fake one backed by plain memory, so the sweep and search logic itself
+//! runs unmodified in both.
 
 const std = @import("std");
 const conduit = @import("conduit");
@@ -51,6 +69,10 @@ const CTL_LANE_SHIFT: u5 = 8;
 
 /// STATUS bit fields.
 const STATUS_BUSY: u32 = 0x1;
+const STATUS_CAL_FAILED: u32 = 0x2;
+
+/// The bitslip span the ECP5 2D search tracks (0..15, the RTL's wrap point).
+const MAX_BITSLIP: usize = 16;
 
 /// A bounded poll count so a stuck controller can never hang the boot.
 const POLL_LIMIT: usize = 1_000_000;
@@ -88,8 +110,9 @@ pub const Knob = struct {
     feedback: KnobFeedback = .pattern,
     min: u32 = 0,
     max: u32 = 0,
-    /// True when the RTL applies this knob as a 1-bit level, so a count of N needs
-    /// N repeated APPLY pulses. BITSLIP is the only such knob today.
+    /// True when the RTL applies this knob as one strobe per APPLY, not a held
+    /// level, so a count of N needs N repeated APPLY pulses. BITSLIP is the
+    /// only such knob today.
     advance_only: bool = false,
 
     pub fn name(self: *const Knob) []const u8 {
@@ -197,8 +220,9 @@ pub fn parseTrainingNode(dtb: []const u8) ?TrainDesc {
             if (in_knob) {
                 if (std.mem.eql(u8, p.name, "harbor,knob")) {
                     copyName(&cur, p.value);
-                    // BITSLIP is a 1-bit level in the RTL. Mark it so the engine
-                    // reaches a count with repeated APPLY pulses.
+                    // BITSLIP is one strobe per APPLY in the RTL, not a held
+                    // level. Mark it so the engine reaches a count with
+                    // repeated APPLY pulses.
                     if (std.mem.eql(u8, cur.name(), "bitslip")) cur.advance_only = true;
                 } else if (std.mem.eql(u8, p.name, "harbor,reg")) {
                     cur.reg = cellU32(p.value, 0);
@@ -257,13 +281,69 @@ pub fn parseTrainingNode(dtb: []const u8) ?TrainDesc {
     return null;
 }
 
+// === Console (the firmware UART write cannot fail) =====================
+
+/// Recover the `Serial` backing `con`. Every console this file ever builds is
+/// a `conduit.device.Serial.Writer`. This covers the real firmware's
+/// (`main.zig`: `uart_dev.serial().writer(&con_buf)`) and this file's own
+/// test console, so `con` is always `&that_writer.interface`, and this cast
+/// is sound.
+fn serialOf(con: *std.Io.Writer) conduit.device.Serial {
+    const w: *conduit.device.Serial.Writer = @alignCast(@fieldParentPtr("interface", con));
+    return w.serial;
+}
+
+/// The widest formatted value this file ever prints is a 32-bit or usize
+/// quantity as 8 or 16 hex digits (`{X:0>8}` on values that never exceed
+/// `u32`). 16 bytes covers the true worst case (a full 64-bit value in hex)
+/// with no slack needed beyond that.
+const PUT_FMT_BUF_LEN: usize = 16;
+
+/// Write to the console. `Serial.write` (conduit's `device/serial.zig`)
+/// blocks until the UART accepts each byte and never returns an error, so
+/// there is no fallible path to propagate or swallow here.
+fn put(con: *std.Io.Writer, bytes: []const u8) void {
+    serialOf(con).write(bytes);
+}
+
+/// Format into a fixed stack buffer, then write the result. `PUT_FMT_BUF_LEN`
+/// is sized for every format this file uses, but a future format that does
+/// not fit writes a short fixed marker instead of overflowing or crashing.
+fn putFmt(con: *std.Io.Writer, comptime fmt: []const u8, args: anytype) void {
+    var buf: [PUT_FMT_BUF_LEN]u8 = undefined;
+    const s = std.fmt.bufPrint(&buf, fmt, args) catch "<fmt overflow>";
+    serialOf(con).write(s);
+}
+
+fn putByte(con: *std.Io.Writer, byte: u8) void {
+    serialOf(con).write(&.{byte});
+}
+
 // === Register access ===================================================
+
+/// The real MMIO bus: a raw volatile 32-bit access at a byte address. The
+/// firmware passes this into `trainController`. Every lower-level function in
+/// this file takes `bus: anytype` instead of touching memory directly, so a
+/// test can pass a fake bus backed by plain memory and run the real sweep and
+/// search logic unmodified. See `docs/portability.md`'s comptime-selected-
+/// backend pattern in the IronStyle guide.
+const RealBus = struct {
+    pub fn read32(self: RealBus, addr: usize) u32 {
+        _ = self;
+        return @as(*volatile u32, @ptrFromInt(addr)).*;
+    }
+
+    pub fn write32(self: RealBus, addr: usize, value: u32) void {
+        _ = self;
+        @as(*volatile u32, @ptrFromInt(addr)).* = value;
+    }
+};
 
 /// Do a dummy read so the write-to-read turnaround settles before the next real
 /// read. The volatile access is the delay, so the value goes nowhere.
-fn warmRead(addr: usize) void {
+fn warmRead(bus: anytype, addr: usize) void {
     // zippy:ignore discarded_error -- dummy read, the volatile access is the delay
-    _ = @as(*volatile u32, @ptrFromInt(addr)).*;
+    _ = bus.read32(addr);
 }
 
 /// The MMIO address of a control-block register at the given index.
@@ -274,10 +354,10 @@ fn ctlAddr(d: *const TrainDesc, index: u32) usize {
 /// Wait for the controller to finish the last apply. Return true when BUSY clears
 /// inside the poll budget. A timeout is a runtime fault, not a programmer error,
 /// so the caller decides what to do.
-fn waitNotBusy(d: *const TrainDesc) bool {
+fn waitNotBusy(bus: anytype, d: *const TrainDesc) bool {
     var i: usize = 0;
     while (i < POLL_LIMIT) : (i += 1) {
-        const status = @as(*volatile u32, @ptrFromInt(ctlAddr(d, STATUS_INDEX))).*;
+        const status = bus.read32(ctlAddr(d, STATUS_INDEX));
         if (status & STATUS_BUSY == 0) return true;
     }
     return false;
@@ -285,14 +365,14 @@ fn waitNotBusy(d: *const TrainDesc) bool {
 
 /// Run the knob protocol once. Write the value, select the lane, pulse SET, pulse
 /// APPLY, then wait for BUSY to clear.
-fn applyKnob(d: *const TrainDesc, knob: *const Knob, lane: u32, value: u32) void {
+fn applyKnob(bus: anytype, d: *const TrainDesc, knob: *const Knob, lane: u32, value: u32) void {
     const lane_sel = (lane & 0xF) << CTL_LANE_SHIFT;
-    @as(*volatile u32, @ptrFromInt(@as(usize, @intCast(d.train_base + knob.reg)))).* = value;
-    @as(*volatile u32, @ptrFromInt(ctlAddr(d, CTL_INDEX))).* = CTL_SET | lane_sel;
-    @as(*volatile u32, @ptrFromInt(ctlAddr(d, CTL_INDEX))).* = CTL_APPLY | lane_sel;
+    bus.write32(@as(usize, @intCast(d.train_base + knob.reg)), value);
+    bus.write32(ctlAddr(d, CTL_INDEX), CTL_SET | lane_sel);
+    bus.write32(ctlAddr(d, CTL_INDEX), CTL_APPLY | lane_sel);
     // A busy-timeout is bounded by POLL_LIMIT and shows up later as a failed
     // pattern check, so a dropped result here cannot hang the boot.
-    _ = waitNotBusy(d); // zippy:ignore discarded_error -- the fault shows in the pattern check
+    _ = waitNotBusy(bus, d); // zippy:ignore discarded_error -- the fault shows in the pattern check
 }
 
 // === Pattern feedback ==================================================
@@ -329,7 +409,7 @@ fn laneByteMask(lanes: u32, lane: u32) u32 {
 /// Write a known pattern to the DRAM scratch words, read it back, and return true
 /// when every masked word matches. The mask narrows the check to the bytes the
 /// slice under test owns.
-fn patternPasses(dram_base: usize, mask: u32) bool {
+fn patternPasses(bus: anytype, dram_base: usize, mask: u32) bool {
     const scratch = dram_base + SCRATCH_OFFSET;
     // A 0xC0DE tag plus a rolling low half exercises the data lines. The 0x5555
     // and 0xAAAA words drive every bit in both directions.
@@ -339,12 +419,12 @@ fn patternPasses(dram_base: usize, mask: u32) bool {
     };
     var i: usize = 0;
     while (i < PATTERN_WORDS) : (i += 1) {
-        @as(*volatile u32, @ptrFromInt(scratch + i * 4)).* = pats[i];
+        bus.write32(scratch + i * 4, pats[i]);
     }
-    warmRead(scratch);
+    warmRead(bus, scratch);
     i = 0;
     while (i < PATTERN_WORDS) : (i += 1) {
-        const got = @as(*volatile u32, @ptrFromInt(scratch + i * 4)).*;
+        const got = bus.read32(scratch + i * 4);
         if ((got & mask) != (pats[i] & mask)) return false;
     }
     return true;
@@ -395,44 +475,44 @@ fn widestCenter(pass: []const bool, min: u32, max: u32) SweepResult {
 /// Sweep one slice of an absolute-value knob. Each tap writes an absolute value,
 /// so the engine can set any tap directly. Return the centre of the widest passing
 /// window.
-fn sweepAbsolute(a: SweepArgs) SweepResult {
+fn sweepAbsolute(bus: anytype, a: SweepArgs) SweepResult {
     var pass: [33]bool = @splat(false); // taps 0..31 plus a guard slot
     const mask = sliceMask(a.d, a.knob, a.slice);
     var tap = a.knob.min;
     var pass_count: u32 = 0;
     while (tap <= a.knob.max) : (tap += 1) {
-        applyKnob(a.d, a.knob, a.lane, tap);
-        const ok = patternPasses(a.dram_base, mask);
+        applyKnob(bus, a.d, a.knob, a.lane, tap);
+        const ok = patternPasses(bus, a.dram_base, mask);
         if (tap < pass.len) pass[tap] = ok;
         if (ok) pass_count += 1;
         if (tap == a.knob.max) break;
     }
     logSlice(a.con, a.knob, a.slice, pass_count);
     const res = widestCenter(pass[0..], a.knob.min, @min(a.knob.max, @as(u32, pass.len - 1)));
-    if (res.found) applyKnob(a.d, a.knob, a.lane, res.center);
+    if (res.found) applyKnob(bus, a.d, a.knob, a.lane, res.center);
     return res;
 }
 
-/// Advance a 1-bit-level knob by one count. The value written does not carry the
-/// count. Each APPLY pulse steps the level by one.
-fn advanceOne(d: *const TrainDesc, knob: *const Knob, lane: u32) void {
-    applyKnob(d, knob, lane, 1);
+/// Advance a strobe-per-APPLY knob by one count. The value written does not
+/// carry the count. Each APPLY pulse steps the count by one.
+fn advanceOne(bus: anytype, d: *const TrainDesc, knob: *const Knob, lane: u32) void {
+    applyKnob(bus, d, knob, lane, 1);
 }
 
-/// Sweep one slice of a 1-bit-level knob (BITSLIP). The level cannot be set to an
-/// absolute count, so the engine steps it forward and checks each count. The count
-/// range wraps at max+1. The sweep assumes the level starts at 0.
-fn sweepAdvance(a: SweepArgs) SweepResult {
+/// Sweep one slice of a strobe-per-APPLY knob (BITSLIP). The count cannot be set
+/// to an absolute value, so the engine steps it forward and checks each count.
+/// The count range wraps at max+1. The sweep assumes the count starts at 0.
+fn sweepAdvance(bus: anytype, a: SweepArgs) SweepResult {
     var pass: [9]bool = @splat(false); // counts 0..7 plus a guard slot
     const mask = sliceMask(a.d, a.knob, a.slice);
     const span = a.knob.max + 1; // the wrap period, e.g. 8 for a 3-bit slip
     var pass_count: u32 = 0;
     var count: u32 = 0;
     while (count <= a.knob.max) : (count += 1) {
-        const ok = patternPasses(a.dram_base, mask);
+        const ok = patternPasses(bus, a.dram_base, mask);
         if (count < pass.len) pass[count] = ok;
         if (ok) pass_count += 1;
-        advanceOne(a.d, a.knob, a.lane);
+        advanceOne(bus, a.d, a.knob, a.lane);
         if (count == a.knob.max) break;
     }
     // The sweep issued max+1 pulses, so the level wrapped back to 0.
@@ -441,9 +521,128 @@ fn sweepAdvance(a: SweepArgs) SweepResult {
     if (res.found) {
         // Step from 0 to the chosen centre.
         var i: u32 = 0;
-        while (i < res.center % span) : (i += 1) advanceOne(a.d, a.knob, a.lane);
+        while (i < res.center % span) : (i += 1) advanceOne(bus, a.d, a.knob, a.lane);
     }
     return res;
+}
+
+// === ECP5 2D read leveling (bitslip x read-clk-sel) ====================
+
+/// Find a knob by name. Used to pair the bitslip knob with a read-clk-sel
+/// sibling without guessing the PHY vendor: an ECP5 build's device tree
+/// carries both, a Xilinx build's carries only bitslip.
+fn findKnobIndex(d: *const TrainDesc, name: []const u8) ?usize {
+    var i: usize = 0;
+    while (i < d.knob_count) : (i += 1) {
+        if (std.mem.eql(u8, d.knobs[i].name(), name)) return i;
+    }
+    return null;
+}
+
+/// Pick the index of the highest score. The first instance wins a tie, the
+/// LiteX BIOS rule for choosing the winning bitslip.
+fn bestScoreIndex(scores: []const u32) usize {
+    var best: usize = 0;
+    var i: usize = 1;
+    while (i < scores.len) : (i += 1) {
+        if (scores[i] > scores[best]) best = i;
+    }
+    return best;
+}
+
+/// Sweep every read-clk-sel value at the current bitslip position. Returns the
+/// pass count and fills `pass_buf` so the caller can centre the window later.
+fn scanClkSel(
+    bus: anytype,
+    d: *const TrainDesc,
+    clksel: *const Knob,
+    lane: u32,
+    mask: u32,
+    dram_base: usize,
+    pass_buf: []bool,
+) u32 {
+    var count: u32 = 0;
+    var tap = clksel.min;
+    while (tap <= clksel.max) : (tap += 1) {
+        applyKnob(bus, d, clksel, lane, tap);
+        const ok = patternPasses(bus, dram_base, mask);
+        if (tap < pass_buf.len) pass_buf[tap] = ok;
+        if (ok) count += 1;
+        if (tap == clksel.max) break;
+    }
+    return count;
+}
+
+/// Run the ECP5 2D read-leveling search for one lane: sweep read-clk-sel at
+/// every bitslip position, score each position by its pass count, then pick
+/// the highest-scoring bitslip and centre read-clk-sel inside its passing
+/// window. Mirrors the LiteX BIOS `sdram_read_leveling` algorithm.
+fn sweep2D(
+    bus: anytype,
+    con: *std.Io.Writer,
+    d: *const TrainDesc,
+    bitslip: *const Knob,
+    clksel: *const Knob,
+    lane: u32,
+    dram_base: usize,
+) bool {
+    const clk_mask = sliceMask(d, clksel, lane);
+    var scores: [MAX_BITSLIP]u32 = @splat(0);
+    var passes: [MAX_BITSLIP][9]bool = @splat(@splat(false));
+
+    var bit: u32 = 0;
+    while (bit <= bitslip.max) : (bit += 1) {
+        if (bit < MAX_BITSLIP) {
+            scores[bit] = scanClkSel(bus, d, clksel, lane, clk_mask, dram_base, passes[bit][0..]);
+        } else {
+            var spare: [9]bool = @splat(false);
+            _ = scanClkSel(bus, d, clksel, lane, clk_mask, dram_base, spare[0..]);
+        }
+        advanceOne(bus, d, bitslip, lane);
+        if (bit == bitslip.max) break;
+    }
+    // The outer loop wrapped bitslip back to 0. Step forward to the winner.
+    const span: usize = @min(@as(usize, bitslip.max) + 1, MAX_BITSLIP);
+    const best_bit = bestScoreIndex(scores[0..span]);
+    var i: u32 = 0;
+    while (i < best_bit) : (i += 1) advanceOne(bus, d, bitslip, lane);
+
+    put(con, "[fsbl] train: knob=");
+    put(con, bitslip.name());
+    put(con, " slice=");
+    putFmt(con, "{X}", .{lane & 0xF});
+    put(con, " bitslip=0x");
+    putFmt(con, "{X:0>8}", .{best_bit});
+    put(con, " score=0x");
+    putFmt(con, "{X:0>8}", .{scores[best_bit]});
+    putByte(con, '\n');
+
+    const res = widestCenter(
+        passes[best_bit][0..],
+        clksel.min,
+        @min(clksel.max, @as(u32, passes[best_bit].len - 1)),
+    );
+    if (!res.found) {
+        put(con, "[fsbl] train: knob=");
+        put(con, clksel.name());
+        put(con, " NO PASSING WINDOW\n");
+        return false;
+    }
+    applyKnob(bus, d, clksel, lane, res.center);
+    put(con, "[fsbl] train: knob=");
+    put(con, clksel.name());
+    put(con, " slice=");
+    putFmt(con, "{X}", .{lane & 0xF});
+    put(con, " centred tap=0x");
+    putFmt(con, "{X:0>8}", .{res.center});
+    putByte(con, '\n');
+    return true;
+}
+
+/// Read STATUS.cal_failed. True once a self-training controller gave up after
+/// its own retry budget and left the array uncalibrated.
+fn calFailed(bus: anytype, d: *const TrainDesc) bool {
+    return bus.read32(ctlAddr(d, STATUS_INDEX)) & STATUS_CAL_FAILED != 0;
 }
 
 // === Logging ===========================================================
@@ -452,7 +651,7 @@ fn logSlice(con: *std.Io.Writer, knob: *const Knob, slice: u32, pass_count: u32)
     con.writeAll("[fsbl] train: knob=") catch {};
     con.writeAll(knob.name()) catch {};
     con.writeAll(" slice=") catch {};
-    con.print("{X}", .{@intCast(slice & 0xF)}) catch {};
+    putFmt(con, "{X}", .{slice & 0xF});
     con.writeAll(" passes=0x") catch {};
     con.print("{X:0>8}", .{pass_count}) catch {};
     con.writeByte('\n') catch {};
@@ -476,29 +675,50 @@ fn sliceLane(knob: *const Knob, slice: u32) u32 {
     };
 }
 
-/// Drive one controller through the whole knob table. For each knob, in the device
-/// tree order (which is the apply order), sweep every slice and park the tap at the
-/// widest passing window. Finish with the shared memtest. Return true when every
-/// knob centres and the memtest passes.
-pub fn trainController(
+/// Drive one controller through the whole knob table over `bus`. For each
+/// knob, in the device tree order (which is the apply order), sweep every
+/// slice and park the tap at the widest passing window. Finish with the
+/// shared memtest. Return true when every knob centres, STATUS reports no
+/// calibration failure, and the memtest passes.
+///
+/// `bus` lets a test drive this with a fake register window instead of real
+/// MMIO. `trainController` below is the real-hardware entry point.
+fn trainControllerBus(
+    bus: anytype,
     con: *std.Io.Writer,
     d: *const TrainDesc,
     dram_base: usize,
     memtest: *const fn (*std.Io.Writer) bool,
 ) bool {
-    const cap = @as(*volatile u32, @ptrFromInt(ctlAddr(d, CAP_INDEX))).*;
+    const cap = bus.read32(ctlAddr(d, CAP_INDEX));
     con.writeAll("[fsbl] train: window base=0x") catch {};
-    con.print("{X:0>8}", .{@intCast(d.train_base & 0xFFFF_FFFF)}) catch {};
+    putFmt(con, "{X:0>8}", .{d.train_base & 0xFFFF_FFFF});
     con.writeAll(" lanes=") catch {};
-    con.print("{X}", .{@intCast(d.lanes & 0xF)}) catch {};
+    putFmt(con, "{X}", .{d.lanes & 0xF});
     con.writeAll(" knobs=") catch {};
-    con.print("{X}", .{@intCast(d.knob_count & 0xF)}) catch {};
+    putFmt(con, "{X}", .{d.knob_count & 0xF});
     con.writeAll(" cap=0x") catch {};
     con.print("{X:0>8}", .{cap}) catch {};
     con.writeByte('\n') catch {};
 
+    // An ECP5 build pairs the bitslip knob with a read-clk-sel knob. Find
+    // the pair by name before the main loop, not by iteration order, so the
+    // 2D search runs correctly whichever knob the device tree lists first.
+    // A Xilinx build has no read-clk-sel knob, so this never matches there.
+    var skip: [MAX_KNOBS]bool = @splat(false);
+    var ecp5_bitslip: ?usize = null;
+    var ecp5_clksel: ?usize = null;
+    if (findKnobIndex(d, "bitslip")) |bit_idx| {
+        if (findKnobIndex(d, "read-clk-sel")) |clk_idx| {
+            ecp5_bitslip = bit_idx;
+            ecp5_clksel = clk_idx;
+            skip[clk_idx] = true;
+        }
+    }
+
     var ki: usize = 0;
     while (ki < d.knob_count) : (ki += 1) {
+        if (skip[ki]) continue;
         const knob = &d.knobs[ki];
         if (knob.feedback == .map) {
             // The controller has no clean write-leveling result signal yet, so the
@@ -507,6 +727,16 @@ pub fn trainController(
             con.writeAll("[fsbl] train: knob=") catch {};
             con.writeAll(knob.name()) catch {};
             con.writeAll(" feedback=map placeholder, skipped\n") catch {};
+            continue;
+        }
+        if (ecp5_bitslip != null and ki == ecp5_bitslip.?) {
+            const clksel = &d.knobs[ecp5_clksel.?];
+            const slices = sliceCount(d, knob);
+            var s: u32 = 0;
+            while (s < slices) : (s += 1) {
+                const lane = sliceLane(knob, s);
+                if (!sweep2D(bus, con, d, knob, clksel, lane, dram_base)) return false;
+            }
             continue;
         }
         const slices = sliceCount(d, knob);
@@ -522,29 +752,45 @@ pub fn trainController(
                 .dram_base = dram_base,
             };
             const res = if (knob.advance_only)
-                sweepAdvance(args)
+                sweepAdvance(bus, args)
             else
-                sweepAbsolute(args);
+                sweepAbsolute(bus, args);
             if (!res.found) {
                 con.writeAll("[fsbl] train: knob=") catch {};
                 con.writeAll(knob.name()) catch {};
                 con.writeAll(" slice=") catch {};
-                con.print("{X}", .{@intCast(s & 0xF)}) catch {};
+                putFmt(con, "{X}", .{s & 0xF});
                 con.writeAll(" NO PASSING TAP\n") catch {};
                 return false;
             }
             con.writeAll("[fsbl] train: knob=") catch {};
             con.writeAll(knob.name()) catch {};
             con.writeAll(" slice=") catch {};
-            con.print("{X}", .{@intCast(s & 0xF)}) catch {};
+            putFmt(con, "{X}", .{s & 0xF});
             con.writeAll(" centred tap=0x") catch {};
             con.print("{X:0>8}", .{res.center}) catch {};
             con.writeByte('\n') catch {};
         }
     }
 
+    if (calFailed(bus, d)) {
+        put(con, "[fsbl] train: FATAL: controller STATUS cal_failed is set\n");
+        return false;
+    }
+
     con.writeAll("[fsbl] train: knobs centred, running memtest\n") catch {};
     return memtest(con);
+}
+
+/// Drive one controller through the whole knob table, over the real MMIO bus.
+/// See `trainControllerBus` for the full contract.
+pub fn trainController(
+    con: *std.Io.Writer,
+    d: *const TrainDesc,
+    dram_base: usize,
+    memtest: *const fn (*std.Io.Writer) bool,
+) bool {
+    return trainControllerBus(RealBus{}, con, d, dram_base, memtest);
 }
 
 // === Tests =============================================================
@@ -607,4 +853,276 @@ test "laneByteMask splits a 16-bit bus into two lanes" {
     // Two lanes over a 4-byte word: lane 0 owns bytes 0 and 2, lane 1 owns 1 and 3.
     try std.testing.expectEqual(@as(u32, 0x00FF_00FF), laneByteMask(2, 0));
     try std.testing.expectEqual(@as(u32, 0xFF00_FF00), laneByteMask(2, 1));
+}
+
+test "bestScoreIndex picks the first highest score" {
+    const scores = [_]u32{ 2, 5, 5, 1 };
+    try std.testing.expectEqual(@as(usize, 1), bestScoreIndex(scores[0..]));
+}
+
+test "bestScoreIndex handles a single score" {
+    const scores = [_]u32{7};
+    try std.testing.expectEqual(@as(usize, 0), bestScoreIndex(scores[0..]));
+}
+
+test "findKnobIndex finds a knob by name or returns null" {
+    var d: TrainDesc = .{};
+    copyName(&d.knobs[0], "bitslip");
+    copyName(&d.knobs[1], "read-clk-sel");
+    d.knob_count = 2;
+
+    try std.testing.expectEqual(@as(?usize, 1), findKnobIndex(&d, "read-clk-sel"));
+    try std.testing.expectEqual(@as(?usize, 0), findKnobIndex(&d, "bitslip"));
+    try std.testing.expectEqual(@as(?usize, null), findKnobIndex(&d, "read-idelay"));
+}
+
+// A `test` block only forces the compiler to analyze what it calls, directly
+// or indirectly. Without this, `trainController`, `sweep2D`, `scanClkSel`,
+// `calFailed`, `applyKnob`, `sweepAdvance`, `sweepAbsolute`, and
+// `patternPasses` would never be referenced by anything in this file's test
+// build, so a compile-breaking change to any of them would pass `zig build
+// test` silently. `refAllDecls` walks every declaration in the module and
+// forces each one to be analyzed.
+test {
+    std.testing.refAllDecls(@This());
+}
+
+/// A fake knob window plus DRAM scratch, standing in for real MMIO so
+/// `sweep2D`/`scanClkSel`/`calFailed` can be driven by a test without
+/// touching memory. A lane 0 read of the scratch region comes back correct
+/// only when the lane's currently committed (bitslip count, read-clk-sel)
+/// is a point `setWindow` marked passing. Otherwise it comes back corrupted,
+/// mirroring how a misaligned PHY corrupts an unleveled read. `pass_mask` is
+/// a set of points, not one scalar window, so a test can model two separate
+/// passing windows at once (a real tie, not merely "no second window").
+/// Lane select (CTL[11:8]) is accepted but not modeled: every test using this
+/// fake drives a single lane.
+const FakeBus = struct {
+    train_base: usize,
+    dram_base: usize,
+    /// Bit `c` of `pass_mask[b]` is set when (bitslip count `b`, read-clk-sel
+    /// `c`) reads correctly together. 8 bits per row covers clksel's full
+    /// 0..7 range.
+    pass_mask: [MAX_BITSLIP]u8 = @splat(0),
+    bitslip_count: u32 = 0,
+    clksel: u32 = 0,
+    sh_bitslip: u32 = 0,
+    sh_clksel: u32 = 0,
+    d_bitslip: bool = false,
+    d_clksel: bool = false,
+    cal_failed: bool = false,
+    scratch: [PATTERN_WORDS * 4]u8 = @splat(0),
+
+    /// Mark every (bitslip, clksel) point in `[clk_lo, clk_hi]` at the given
+    /// bitslip as passing.
+    fn setWindow(self: *FakeBus, bitslip: u32, clk_lo: u32, clk_hi: u32) void {
+        var c = clk_lo;
+        while (c <= clk_hi) : (c += 1) self.pass_mask[bitslip] |= @as(u8, 1) << @intCast(c);
+    }
+
+    fn trained(self: *const FakeBus) bool {
+        if (self.bitslip_count >= MAX_BITSLIP) return false;
+        return self.pass_mask[self.bitslip_count] & (@as(u8, 1) << @intCast(self.clksel)) != 0;
+    }
+
+    pub fn read32(self: *const FakeBus, addr: usize) u32 {
+        if (addr >= self.train_base and addr < self.train_base + 0x40) {
+            const off = addr - self.train_base;
+            return switch (off) {
+                0x28 => if (self.cal_failed) STATUS_CAL_FAILED else 0, // STATUS
+                else => 0,
+            };
+        }
+        const scratch_base = self.dram_base + SCRATCH_OFFSET;
+        const off = addr - scratch_base;
+        var word: u32 = 0;
+        for (0..4) |i| word |= @as(u32, self.scratch[off + i]) << @intCast(8 * i);
+        if (!self.trained()) word = ~word;
+        return word;
+    }
+
+    pub fn write32(self: *FakeBus, addr: usize, value: u32) void {
+        if (addr >= self.train_base and addr < self.train_base + 0x40) {
+            const off = addr - self.train_base;
+            switch (off) {
+                0x18 => { // BITSLIP
+                    self.sh_bitslip = value & 1;
+                    self.d_bitslip = true;
+                },
+                0x38 => { // RDCLKSEL
+                    self.sh_clksel = value & 0x7;
+                    self.d_clksel = true;
+                },
+                0x20 => { // CTL
+                    if (value & CTL_APPLY != 0) {
+                        if (self.d_bitslip and self.sh_bitslip == 1) {
+                            self.bitslip_count = (self.bitslip_count + 1) % 16;
+                        }
+                        if (self.d_clksel) self.clksel = self.sh_clksel;
+                        self.d_bitslip = false;
+                        self.d_clksel = false;
+                    }
+                },
+                else => {},
+            }
+            return;
+        }
+        const scratch_base = self.dram_base + SCRATCH_OFFSET;
+        const off = addr - scratch_base;
+        for (0..4) |i| self.scratch[off + i] = @intCast((value >> @intCast(8 * i)) & 0xFF);
+    }
+};
+
+/// A `Serial` that drops every write. Methods take `*const` since none of
+/// them touch any state.
+const NullSerial = struct {
+    pub fn write(_: *const NullSerial, _: []const u8) void {}
+    pub fn read(_: *const NullSerial, _: []u8) usize {
+        return 0;
+    }
+    pub fn txReady(_: *const NullSerial) bool {
+        return true;
+    }
+    pub fn rxReady(_: *const NullSerial) bool {
+        return false;
+    }
+};
+
+/// A test console structurally identical to the real firmware's
+/// (`conduit.device.Serial.Writer`), so `serialOf`'s recovery of the
+/// underlying `Serial` is sound in tests too, not only in the firmware.
+const TestConsole = struct {
+    impl: NullSerial = .{},
+    buf: [0]u8 = .{},
+    writer: conduit.device.Serial.Writer = undefined,
+
+    fn interface(self: *TestConsole) *std.Io.Writer {
+        self.writer = conduit.device.Serial.from(&self.impl).writer(&self.buf);
+        return &self.writer.interface;
+    }
+};
+
+test "sweep2D centres read-clk-sel on the highest-scoring bitslip" {
+    var bitslip: Knob = .{ .reg = 0x18, .min = 0, .max = 15, .advance_only = true };
+    copyName(&bitslip, "bitslip");
+    var clksel: Knob = .{ .reg = 0x38, .min = 0, .max = 7 };
+    copyName(&clksel, "read-clk-sel");
+    const d: TrainDesc = .{ .train_base = 0x1000_0000, .stride = 8, .lanes = 1 };
+    var fake = FakeBus{ .train_base = d.train_base, .dram_base = 0x2000_0000 };
+    fake.setWindow(9, 3, 5);
+    var console: TestConsole = .{};
+    const con = console.interface();
+
+    const ok = sweep2D(&fake, con, &d, &bitslip, &clksel, 0, fake.dram_base);
+    try std.testing.expect(ok);
+    try std.testing.expectEqual(@as(u32, 9), fake.bitslip_count);
+    try std.testing.expectEqual(@as(u32, 4), fake.clksel); // centre of [3,5] -> 3 + 3/2
+}
+
+test "sweep2D picks the first bitslip on a scoring tie" {
+    // Two real, equally wide (width 2) passing windows: bitslip 2 scores the
+    // same as bitslip 10. The LiteX BIOS rule (and bestScoreIndex) says the
+    // first one, bitslip 2, wins.
+    var bitslip: Knob = .{ .reg = 0x18, .min = 0, .max = 15, .advance_only = true };
+    copyName(&bitslip, "bitslip");
+    var clksel: Knob = .{ .reg = 0x38, .min = 0, .max = 7 };
+    copyName(&clksel, "read-clk-sel");
+    const d: TrainDesc = .{ .train_base = 0x1000_0000, .stride = 8, .lanes = 1 };
+    var fake = FakeBus{ .train_base = d.train_base, .dram_base = 0x2000_0000 };
+    fake.setWindow(2, 0, 1);
+    fake.setWindow(10, 4, 5);
+    var console: TestConsole = .{};
+    const con = console.interface();
+
+    const ok = sweep2D(&fake, con, &d, &bitslip, &clksel, 0, fake.dram_base);
+    try std.testing.expect(ok);
+    try std.testing.expectEqual(@as(u32, 2), fake.bitslip_count);
+    try std.testing.expectEqual(@as(u32, 1), fake.clksel); // centre of [0,1] -> 0 + 2/2
+}
+
+test "scanClkSel reports the pass count and fills the pass array" {
+    var clksel: Knob = .{ .reg = 0x38, .min = 0, .max = 7 };
+    copyName(&clksel, "read-clk-sel");
+    const d: TrainDesc = .{ .train_base = 0x1000_0000, .stride = 8, .lanes = 1 };
+    var fake = FakeBus{ .train_base = d.train_base, .dram_base = 0x2000_0000 };
+    fake.setWindow(0, 2, 4); // already at the right bitslip (reset value)
+    var pass: [9]bool = @splat(false);
+
+    const count = scanClkSel(&fake, &d, &clksel, 0, 0xFFFF_FFFF, fake.dram_base, pass[0..]);
+    try std.testing.expectEqual(@as(u32, 3), count);
+    try std.testing.expect(!pass[1]);
+    try std.testing.expect(pass[2]);
+    try std.testing.expect(pass[3]);
+    try std.testing.expect(pass[4]);
+    try std.testing.expect(!pass[5]);
+}
+
+test "calFailed reads STATUS bit 1 through the bus" {
+    const d: TrainDesc = .{ .train_base = 0x1000_0000, .stride = 8, .lanes = 1 };
+    var fake = FakeBus{ .train_base = d.train_base, .dram_base = 0x2000_0000 };
+    try std.testing.expect(!calFailed(&fake, &d));
+    fake.cal_failed = true;
+    try std.testing.expect(calFailed(&fake, &d));
+}
+
+test "trainControllerBus aborts on cal_failed without running the memtest" {
+    // A device tree with nothing to sweep (no knobs): the sweep loop does
+    // nothing, so the only thing that can stop this run is the cal_failed
+    // check that follows it.
+    var memtest_called = false;
+    const Harness = struct {
+        var called: *bool = undefined;
+        fn run(con: *std.Io.Writer) bool {
+            _ = con;
+            called.* = true;
+            return true;
+        }
+    };
+    Harness.called = &memtest_called;
+
+    const d: TrainDesc = .{ .train_base = 0x1000_0000, .stride = 8, .lanes = 1 };
+    var fake = FakeBus{ .train_base = d.train_base, .dram_base = 0x2000_0000, .cal_failed = true };
+    var console: TestConsole = .{};
+    const con = console.interface();
+
+    const ok = trainControllerBus(&fake, con, &d, fake.dram_base, Harness.run);
+    try std.testing.expect(!ok);
+    try std.testing.expect(!memtest_called);
+}
+
+test "trainControllerBus runs the 2D search regardless of knob order" {
+    // read-clk-sel listed before bitslip, the opposite of HarborDdr3's own
+    // emission order. The pairing is found by name, not by which one the
+    // main loop reaches first, so this must still run the 2D search once
+    // (not sweep read-clk-sel alone first, then bitslip alone).
+    var d: TrainDesc = .{ .train_base = 0x1000_0000, .stride = 8, .lanes = 1 };
+    copyName(&d.knobs[0], "read-clk-sel");
+    d.knobs[0].reg = 0x38;
+    d.knobs[0].max = 7;
+    copyName(&d.knobs[1], "bitslip");
+    d.knobs[1].reg = 0x18;
+    d.knobs[1].max = 15;
+    d.knobs[1].advance_only = true;
+    d.knob_count = 2;
+
+    var memtest_called = false;
+    const Harness = struct {
+        var called: *bool = undefined;
+        fn run(con: *std.Io.Writer) bool {
+            _ = con;
+            called.* = true;
+            return true;
+        }
+    };
+    Harness.called = &memtest_called;
+
+    var fake = FakeBus{ .train_base = d.train_base, .dram_base = 0x2000_0000 };
+    fake.setWindow(3, 1, 2);
+    var console: TestConsole = .{};
+    const con = console.interface();
+
+    const ok = trainControllerBus(&fake, con, &d, fake.dram_base, Harness.run);
+    try std.testing.expect(ok);
+    try std.testing.expect(memtest_called);
+    try std.testing.expectEqual(@as(u32, 3), fake.bitslip_count);
 }

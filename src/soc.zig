@@ -394,16 +394,6 @@ fn readFwcfgBase() usize {
     return 0;
 }
 
-// DDR read-training control window. Harbor decodes it in the top trainCtrlSize
-// (0x1000) bytes of the sdram controller's region. So the window base is the
-// controller base plus the controller size minus trainCtrlSize. Zero means no
-// CPU training window is present. The FSBL then takes the static no-training
-// path.
-const ddr_train_ctrl_size: usize = 0x1000; // == HarborDdrController.trainCtrlSize
-const sdram_mmio = firstMmio(.sdram);
-pub const ddr_train_base: usize =
-    if (sdram_mmio) |r| @intCast(r.base + r.size - ddr_train_ctrl_size) else 0;
-
 // SD/MMC host, River's block device. Absent on creek. 0 means none.
 pub const sdhci_base: usize = if (firstMmioId(.block, &sdhci_ids)) |r| @intCast(r.base) else 0;
 // The host controller's input clock. The SD clock divider derives from it, so a
