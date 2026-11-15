@@ -213,6 +213,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run the unit tests");
     const pure_tests = [_][]const u8{
         "src/acpi/madt.zig",
+        "src/acpi/tables.zig",
         "src/smbios/structs.zig",
         "src/smbios/table.zig",
     };

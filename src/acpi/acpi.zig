@@ -14,6 +14,7 @@ const soc = @import("soc");
 const qemu = @import("qemu.zig");
 const aml = @import("aml.zig");
 const madt = @import("madt.zig");
+const tables = @import("tables.zig");
 const conduit = @import("conduit");
 
 /// Build the table set referencing `dsdt` (raw AML) and report a summary. No
@@ -22,22 +23,6 @@ pub fn setup(dsdt: ?[]const u8) void {
     build(dsdt) catch {
         console.err.writeAll("[acpi] table construction failed (buffer too small)\n") catch {};
     };
-}
-
-/// SPCR body (after the 36-byte SDT header): a full-16550 console at `uart_base`,
-/// byte-wide registers, 115200 8N1, polled.
-fn spcrBody(uart_base: u64) [44]u8 {
-    var b: [44]u8 = @splat(0);
-    b[0] = 0x00; // interface type: full 16550
-    b[4] = 0x00; // base address GAS: system memory
-    b[5] = 8; // register bit width
-    b[7] = 1; // access size: byte
-    std.mem.writeInt(u64, b[8..16], uart_base, .little);
-    b[22] = 7; // baud rate: 115200
-    b[24] = 1; // stop bits: 1
-    std.mem.writeInt(u16, b[28..30], 0xFFFF, .little); // not a PCI device
-    std.mem.writeInt(u16, b[30..32], 0xFFFF, .little); // not a PCI vendor
-    return b;
 }
 
 // The PLIC's ACPI identity. One PLIC exists on every River SoC today, so it is
@@ -90,43 +75,6 @@ fn madtBody() []const u8 {
         .base = soc.plic_base,
         .gsi_base = plic_gsi_base,
     });
-}
-
-/// Build the RHCT body into `buf`: the hart timebase, then an ISA-string node,
-/// an MMU node (the paging scheme the OS needs before it can enable paging), and
-/// a hart-info node referencing both. Node offsets are relative to the table
-/// start (header + 20 = 56). Returns the used bytes (variable ISA length).
-fn buildRhct(buf: []u8, timebase: u64, isa: []const u8, mmu_type: u8) []const u8 {
-    @memset(buf, 0);
-    // buf[0..4] flags: 0.
-    std.mem.writeInt(u64, buf[4..12], timebase, .little); // time base frequency
-    std.mem.writeInt(u32, buf[12..16], 3, .little); // node count: ISA, MMU, hart info
-    std.mem.writeInt(u32, buf[16..20], 56, .little); // offset of the first node
-    // ISA string node (type 0) at body offset 20 (table offset 56).
-    const isa_len = isa.len + 1; // include the null terminator
-    const isa_node = (8 + isa_len + 1) & ~@as(usize, 1); // pad to 2 bytes
-    std.mem.writeInt(u16, buf[20..22], 0, .little); // node type: ISA string
-    std.mem.writeInt(u16, buf[22..24], @intCast(isa_node), .little);
-    std.mem.writeInt(u16, buf[24..26], 1, .little); // revision
-    std.mem.writeInt(u16, buf[26..28], @intCast(isa_len), .little); // ISA length
-    @memcpy(buf[28..][0..isa.len], isa);
-    // MMU node (type 2) after the ISA node.
-    const m = 20 + isa_node; // body offset
-    std.mem.writeInt(u16, buf[m..][0..2], 2, .little); // node type: MMU
-    std.mem.writeInt(u16, buf[m + 2 ..][0..2], 8, .little); // node length
-    std.mem.writeInt(u16, buf[m + 4 ..][0..2], 1, .little); // revision
-    buf[m + 6] = 0; // reserved
-    buf[m + 7] = mmu_type; // 0 = Sv39, 1 = Sv48, 2 = Sv57
-    // Hart info node (type 0xFFFF) after the MMU node, referencing ISA and MMU.
-    const h = m + 8;
-    std.mem.writeInt(u16, buf[h..][0..2], 0xFFFF, .little); // node type: hart info
-    std.mem.writeInt(u16, buf[h + 2 ..][0..2], 20, .little); // node length (12 + 2*4)
-    std.mem.writeInt(u16, buf[h + 4 ..][0..2], 1, .little); // revision
-    std.mem.writeInt(u16, buf[h + 6 ..][0..2], 2, .little); // number of offsets
-    std.mem.writeInt(u32, buf[h + 8 ..][0..4], 0, .little); // ACPI processor UID
-    std.mem.writeInt(u32, buf[h + 12 ..][0..4], 56, .little); // table offset of ISA node
-    std.mem.writeInt(u32, buf[h + 16 ..][0..4], @intCast(36 + m), .little); // MMU node
-    return buf[0 .. h + 20];
 }
 
 // Backing storage for the translated device list, filled from soc.devices and
@@ -268,10 +216,10 @@ fn build(dsdt: ?[]const u8) !void {
     // console). Without these an OS that sees the RSDP finds no CPUs and hangs.
     const madt_phys = try b.addTable("APIC", madtBody(), madt.revision);
     var rhct_buf: [512]u8 = undefined;
-    const rhct = buildRhct(&rhct_buf, soc.timebase_hz, soc.cpu_isa, soc.mmu_type);
+    const rhct = tables.rhct(&rhct_buf, soc.timebase_hz, soc.cpu_isa, soc.mmu_type);
     const rhct_phys = try b.addTable("RHCT", rhct, 1);
-    const spcr = spcrBody(soc.uart_base);
-    const spcr_phys = try b.addTable("SPCR", &spcr, 2);
+    const spcr = tables.spcr(soc.uart_base);
+    const spcr_phys = try b.addTable("SPCR", std.mem.asBytes(&spcr), 2);
     const xsdt_phys = try b.xsdt(&.{ fadt_phys, madt_phys, rhct_phys, spcr_phys });
     const rsdp_phys = try b.rsdp(xsdt_phys);
     // Publish through the shared RSDP accessor, the same one the UEFI config

@@ -15,14 +15,15 @@
 //! This file has no dependencies on the platform, so its tests run on the host.
 
 const std = @import("std");
+const structs = @import("structs.zig");
 
 /// MADT subtable type: RISC-V Interrupt Controller.
-pub const type_rintc: u8 = 0x18;
+pub const type_rintc: u8 = structs.MadtRintc.type_id;
 /// MADT subtable type: RISC-V Platform-Level Interrupt Controller.
-pub const type_plic: u8 = 0x1b;
+pub const type_plic: u8 = structs.MadtPlic.type_id;
 
-pub const rintc_len: u8 = 36;
-pub const plic_len: u8 = 36;
+pub const rintc_len: u8 = @sizeOf(structs.MadtRintc);
+pub const plic_len: u8 = @sizeOf(structs.MadtPlic);
 
 /// The fixed part of the body: the local interrupt controller address and the
 /// multiple-APIC flags. Both are zero on RISC-V.
@@ -112,36 +113,30 @@ pub fn extIntcId(plic_id: u8, context: u16) u32 {
 pub fn build(buf: []u8, harts: []const Hart, plic: Plic) []const u8 {
     std.debug.assert(buf.len >= bodyLen(harts.len));
     const body = buf[0..bodyLen(harts.len)];
-    @memset(body, 0);
-    // body[0..4] local interrupt controller address and body[4..8] flags stay
-    // zero. RISC-V has no such controller and no PC-AT compatibility.
+    // The local interrupt controller address and the flags stay zero. RISC-V
+    // has no such controller and no PC-AT compatibility.
+    @memset(body[0..fixed_len], 0);
     var off: usize = fixed_len;
     for (harts) |h| {
-        const r = body[off..][0..rintc_len];
-        r[0] = type_rintc;
-        r[1] = rintc_len;
-        r[2] = 1; // version
-        std.mem.writeInt(u32, r[4..8], 1, .little); // flags: enabled
-        std.mem.writeInt(u64, r[8..16], h.hart_id, .little);
-        std.mem.writeInt(u32, r[16..20], h.uid, .little);
-        const ext: u32 = if (h.context) |c| extIntcId(plic.id, c) else 0;
-        std.mem.writeInt(u32, r[20..24], ext, .little);
-        // r[24..32] IMSIC base and r[32..36] IMSIC size stay zero. A PLIC
-        // system has no IMSIC.
+        const rintc: structs.MadtRintc = .{
+            .flags = structs.MadtRintc.flag_enabled,
+            .hart_id = h.hart_id,
+            .uid = h.uid,
+            .ext_intc_id = if (h.context) |c| extIntcId(plic.id, c) else 0,
+        };
+        @memcpy(body[off..][0..rintc_len], std.mem.asBytes(&rintc));
         off += rintc_len;
     }
-    const p = body[off..][0..plic_len];
-    p[0] = type_plic;
-    p[1] = plic_len;
-    p[2] = 1; // version
-    p[3] = plic.id;
-    @memcpy(p[4..12], &plic.hw_id);
-    std.mem.writeInt(u16, p[12..14], plic.num_irqs, .little);
-    std.mem.writeInt(u16, p[14..16], plic.max_priority, .little);
-    // p[16..20] flags: ACPI 6.6 defines none.
-    std.mem.writeInt(u32, p[20..24], plic.size, .little);
-    std.mem.writeInt(u64, p[24..32], plic.base, .little);
-    std.mem.writeInt(u32, p[32..36], plic.gsi_base, .little);
+    const record: structs.MadtPlic = .{
+        .id = plic.id,
+        .hw_id = plic.hw_id,
+        .num_irqs = plic.num_irqs,
+        .max_priority = plic.max_priority,
+        .size = plic.size,
+        .base = plic.base,
+        .gsi_base = plic.gsi_base,
+    };
+    @memcpy(body[off..][0..plic_len], std.mem.asBytes(&record));
     return body;
 }
 
