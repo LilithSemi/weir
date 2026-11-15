@@ -200,17 +200,23 @@ pub fn build(b: *std.Build) void {
 
     // `zig build test` runs the unit tests of the platform-independent parts.
     // They build for the host, so only modules with no hardware or SoC imports
-    // belong here. src/acpi/madt.zig is one: it lays out MADT bytes and nothing
-    // else, so its tests pin the table an OS reads.
+    // belong here. The files in `pure_tests` are such modules: they lay out
+    // table bytes and nothing else, so their tests pin the tables an OS reads.
     const test_step = b.step("test", "Run the unit tests");
-    const madt_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/acpi/madt.zig"),
-            .target = b.graph.host,
-            .optimize = optimize,
-        }),
-    });
-    test_step.dependOn(&b.addRunArtifact(madt_tests).step);
+    const pure_tests = [_][]const u8{
+        "src/acpi/madt.zig",
+        "src/smbios/structs.zig",
+    };
+    for (pure_tests) |path| {
+        const t = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(path),
+                .target = b.graph.host,
+                .optimize = optimize,
+            }),
+        });
+        test_step.dependOn(&b.addRunArtifact(t).step);
+    }
 
     // src/soc.zig resolves every SoC parameter at comptime from the embedded
     // device tree. Built for the host against the same tree and the same
