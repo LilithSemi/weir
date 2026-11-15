@@ -281,44 +281,6 @@ pub fn parseTrainingNode(dtb: []const u8) ?TrainDesc {
     return null;
 }
 
-// === Console (the firmware UART write cannot fail) =====================
-
-/// Recover the `Serial` backing `con`. Every console this file ever builds is
-/// a `conduit.device.Serial.Writer`. This covers the real firmware's
-/// (`main.zig`: `uart_dev.serial().writer(&con_buf)`) and this file's own
-/// test console, so `con` is always `&that_writer.interface`, and this cast
-/// is sound.
-fn serialOf(con: *std.Io.Writer) conduit.device.Serial {
-    const w: *conduit.device.Serial.Writer = @alignCast(@fieldParentPtr("interface", con));
-    return w.serial;
-}
-
-/// The widest formatted value this file ever prints is a 32-bit or usize
-/// quantity as 8 or 16 hex digits (`{X:0>8}` on values that never exceed
-/// `u32`). 16 bytes covers the true worst case (a full 64-bit value in hex)
-/// with no slack needed beyond that.
-const PUT_FMT_BUF_LEN: usize = 16;
-
-/// Write to the console. `Serial.write` (conduit's `device/serial.zig`)
-/// blocks until the UART accepts each byte and never returns an error, so
-/// there is no fallible path to propagate or swallow here.
-fn put(con: *std.Io.Writer, bytes: []const u8) void {
-    serialOf(con).write(bytes);
-}
-
-/// Format into a fixed stack buffer, then write the result. `PUT_FMT_BUF_LEN`
-/// is sized for every format this file uses, but a future format that does
-/// not fit writes a short fixed marker instead of overflowing or crashing.
-fn putFmt(con: *std.Io.Writer, comptime fmt: []const u8, args: anytype) void {
-    var buf: [PUT_FMT_BUF_LEN]u8 = undefined;
-    const s = std.fmt.bufPrint(&buf, fmt, args) catch "<fmt overflow>";
-    serialOf(con).write(s);
-}
-
-fn putByte(con: *std.Io.Writer, byte: u8) void {
-    serialOf(con).write(&.{byte});
-}
-
 // === Register access ===================================================
 
 /// The real MMIO bus: a raw volatile 32-bit access at a byte address. The
@@ -607,15 +569,9 @@ fn sweep2D(
     var i: u32 = 0;
     while (i < best_bit) : (i += 1) advanceOne(bus, d, bitslip, lane);
 
-    put(con, "[fsbl] train: knob=");
-    put(con, bitslip.name());
-    put(con, " slice=");
-    putFmt(con, "{X}", .{lane & 0xF});
-    put(con, " bitslip=0x");
-    putFmt(con, "{X:0>8}", .{best_bit});
-    put(con, " score=0x");
-    putFmt(con, "{X:0>8}", .{scores[best_bit]});
-    putByte(con, '\n');
+    con.print("[fsbl] train: knob={s} slice={X} bitslip=0x{X:0>8} score=0x{X:0>8}\n", .{
+        bitslip.name(), lane & 0xF, best_bit, scores[best_bit],
+    }) catch {};
 
     const res = widestCenter(
         passes[best_bit][0..],
@@ -623,19 +579,13 @@ fn sweep2D(
         @min(clksel.max, @as(u32, passes[best_bit].len - 1)),
     );
     if (!res.found) {
-        put(con, "[fsbl] train: knob=");
-        put(con, clksel.name());
-        put(con, " NO PASSING WINDOW\n");
+        con.print("[fsbl] train: knob={s} NO PASSING WINDOW\n", .{clksel.name()}) catch {};
         return false;
     }
     applyKnob(bus, d, clksel, lane, res.center);
-    put(con, "[fsbl] train: knob=");
-    put(con, clksel.name());
-    put(con, " slice=");
-    putFmt(con, "{X}", .{lane & 0xF});
-    put(con, " centred tap=0x");
-    putFmt(con, "{X:0>8}", .{res.center});
-    putByte(con, '\n');
+    con.print("[fsbl] train: knob={s} slice={X} centred tap=0x{X:0>8}\n", .{
+        clksel.name(), lane & 0xF, res.center,
+    }) catch {};
     return true;
 }
 
@@ -648,13 +598,9 @@ fn calFailed(bus: anytype, d: *const TrainDesc) bool {
 // === Logging ===========================================================
 
 fn logSlice(con: *std.Io.Writer, knob: *const Knob, slice: u32, pass_count: u32) void {
-    con.writeAll("[fsbl] train: knob=") catch {};
-    con.writeAll(knob.name()) catch {};
-    con.writeAll(" slice=") catch {};
-    putFmt(con, "{X}", .{slice & 0xF});
-    con.writeAll(" passes=0x") catch {};
-    con.print("{X:0>8}", .{pass_count}) catch {};
-    con.writeByte('\n') catch {};
+    con.print("[fsbl] train: knob={s} slice={X} passes=0x{X:0>8}\n", .{
+        knob.name(), slice & 0xF, pass_count,
+    }) catch {};
 }
 
 /// How many slices a knob covers, given its scope and the lane count.
@@ -691,15 +637,9 @@ fn trainControllerBus(
     memtest: *const fn (*std.Io.Writer) bool,
 ) bool {
     const cap = bus.read32(ctlAddr(d, CAP_INDEX));
-    con.writeAll("[fsbl] train: window base=0x") catch {};
-    putFmt(con, "{X:0>8}", .{d.train_base & 0xFFFF_FFFF});
-    con.writeAll(" lanes=") catch {};
-    putFmt(con, "{X}", .{d.lanes & 0xF});
-    con.writeAll(" knobs=") catch {};
-    putFmt(con, "{X}", .{d.knob_count & 0xF});
-    con.writeAll(" cap=0x") catch {};
-    con.print("{X:0>8}", .{cap}) catch {};
-    con.writeByte('\n') catch {};
+    con.print("[fsbl] train: window base=0x{X:0>8} lanes={X} knobs={X} cap=0x{X:0>8}\n", .{
+        d.train_base & 0xFFFF_FFFF, d.lanes & 0xF, d.knob_count & 0xF, cap,
+    }) catch {};
 
     // An ECP5 build pairs the bitslip knob with a read-clk-sel knob. Find
     // the pair by name before the main loop, not by iteration order, so the
@@ -756,25 +696,17 @@ fn trainControllerBus(
             else
                 sweepAbsolute(bus, args);
             if (!res.found) {
-                con.writeAll("[fsbl] train: knob=") catch {};
-                con.writeAll(knob.name()) catch {};
-                con.writeAll(" slice=") catch {};
-                putFmt(con, "{X}", .{s & 0xF});
-                con.writeAll(" NO PASSING TAP\n") catch {};
+                con.print("[fsbl] train: knob={s} slice={X} NO PASSING TAP\n", .{ knob.name(), s & 0xF }) catch {};
                 return false;
             }
-            con.writeAll("[fsbl] train: knob=") catch {};
-            con.writeAll(knob.name()) catch {};
-            con.writeAll(" slice=") catch {};
-            putFmt(con, "{X}", .{s & 0xF});
-            con.writeAll(" centred tap=0x") catch {};
-            con.print("{X:0>8}", .{res.center}) catch {};
-            con.writeByte('\n') catch {};
+            con.print("[fsbl] train: knob={s} slice={X} centred tap=0x{X:0>8}\n", .{
+                knob.name(), s & 0xF, res.center,
+            }) catch {};
         }
     }
 
     if (calFailed(bus, d)) {
-        put(con, "[fsbl] train: FATAL: controller STATUS cal_failed is set\n");
+        con.writeAll("[fsbl] train: FATAL: controller STATUS cal_failed is set\n") catch {};
         return false;
     }
 
@@ -988,9 +920,8 @@ const NullSerial = struct {
     }
 };
 
-/// A test console structurally identical to the real firmware's
-/// (`conduit.device.Serial.Writer`), so `serialOf`'s recovery of the
-/// underlying `Serial` is sound in tests too, not only in the firmware.
+/// A test console with the same writer type as the real firmware's
+/// (`conduit.device.Serial.Writer`), over a serial that drops every write.
 const TestConsole = struct {
     impl: NullSerial = .{},
     buf: [0]u8 = .{},
