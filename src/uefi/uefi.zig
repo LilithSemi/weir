@@ -411,9 +411,12 @@ fn stubAll(comptime T: type, table: *T) void {
     }
 }
 
-/// Install a typed implementation into a service-table field by its name.
-fn put(table: anytype, comptime field: []const u8, impl: anytype) void {
-    @field(table.*, field) = @ptrFromInt(@intFromPtr(impl));
+/// Install typed implementations into a service table. Each field of `impls`
+/// names the table field it fills.
+fn install(table: anytype, impls: anytype) void {
+    inline for (@typeInfo(@TypeOf(impls)).@"struct".field_names) |name| {
+        @field(table.*, name) = @ptrFromInt(@intFromPtr(@field(impls, name)));
+    }
 }
 
 // --- Simple Text Output -----------------------------------------------------
@@ -1265,38 +1268,40 @@ pub fn prepare(dtb: usize, hartid: usize, image_base: usize, image_size: usize) 
 
     // Boot Services: stub everything, then install what a bootloader needs.
     stubAll(tables.BootServices, &boot_services);
-    put(&boot_services, "raiseTpl", &raiseTpl);
-    put(&boot_services, "restoreTpl", &restoreTpl);
-    put(&boot_services, "_allocatePages", &allocatePages);
-    put(&boot_services, "_freePages", &freePages);
-    put(&boot_services, "_getMemoryMap", &getMemoryMap);
-    put(&boot_services, "_allocatePool", &allocatePool);
-    put(&boot_services, "_freePool", &freePool);
-    put(&boot_services, "_handleProtocol", &handleProtocol);
-    put(&boot_services, "_locateProtocol", &locateProtocol);
-    put(&boot_services, "_openProtocol", &openProtocol);
-    put(&boot_services, "_locateHandle", &locateHandle);
-    put(&boot_services, "_locateHandleBuffer", &locateHandleBuffer);
-    put(&boot_services, "_installProtocolInterface", &installProtocolInterface);
-    put(&boot_services, "_installMultipleProtocolInterfaces", &installMultipleProtocolInterfaces);
-    put(&boot_services, "_loadImage", &loadImage);
-    put(&boot_services, "_startImage", &startImage);
-    put(&boot_services, "_unloadImage", &unloadImage);
-    put(&boot_services, "_locateDevicePath", &locateDevicePath);
-    put(&boot_services, "_installConfigurationTable", &installConfigurationTable);
-    put(&boot_services, "_exit", &exitApp);
-    put(&boot_services, "_exitBootServices", &exitBootServices);
-    put(&boot_services, "_stall", &stall);
-    put(&boot_services, "_setWatchdogTimer", &setWatchdogTimer);
-    put(&boot_services, "_createEvent", &createEvent);
-    put(&boot_services, "_createEventEx", &createEventEx);
-    put(&boot_services, "_setTimer", &setTimer);
-    put(&boot_services, "_waitForEvent", &waitForEvent);
-    put(&boot_services, "_checkEvent", &checkEvent);
-    put(&boot_services, "_signalEvent", &signalEvent);
-    put(&boot_services, "_closeEvent", &closeEvent);
-    put(&boot_services, "_copyMem", &copyMem);
-    put(&boot_services, "_setMem", &setMem);
+    install(&boot_services, .{
+        .raiseTpl = &raiseTpl,
+        .restoreTpl = &restoreTpl,
+        ._allocatePages = &allocatePages,
+        ._freePages = &freePages,
+        ._getMemoryMap = &getMemoryMap,
+        ._allocatePool = &allocatePool,
+        ._freePool = &freePool,
+        ._handleProtocol = &handleProtocol,
+        ._locateProtocol = &locateProtocol,
+        ._openProtocol = &openProtocol,
+        ._locateHandle = &locateHandle,
+        ._locateHandleBuffer = &locateHandleBuffer,
+        ._installProtocolInterface = &installProtocolInterface,
+        ._installMultipleProtocolInterfaces = &installMultipleProtocolInterfaces,
+        ._loadImage = &loadImage,
+        ._startImage = &startImage,
+        ._unloadImage = &unloadImage,
+        ._locateDevicePath = &locateDevicePath,
+        ._installConfigurationTable = &installConfigurationTable,
+        ._exit = &exitApp,
+        ._exitBootServices = &exitBootServices,
+        ._stall = &stall,
+        ._setWatchdogTimer = &setWatchdogTimer,
+        ._createEvent = &createEvent,
+        ._createEventEx = &createEventEx,
+        ._setTimer = &setTimer,
+        ._waitForEvent = &waitForEvent,
+        ._checkEvent = &checkEvent,
+        ._signalEvent = &signalEvent,
+        ._closeEvent = &closeEvent,
+        ._copyMem = &copyMem,
+        ._setMem = &setMem,
+    });
     boot_services.hdr = .{
         .signature = tables.BootServices.signature,
         .revision = tables.SystemTable.revision_2_70,
@@ -1308,14 +1313,16 @@ pub fn prepare(dtb: usize, hartid: usize, image_base: usize, image_size: usize) 
 
     // Runtime Services: stub everything, then a working ResetSystem.
     stubAll(tables.RuntimeServices, &runtime_services);
-    put(&runtime_services, "_resetSystem", &resetSystem);
-    put(&runtime_services, "_setVirtualAddressMap", &setVirtualAddressMap);
-    put(&runtime_services, "_getVariable", &getVariable);
-    put(&runtime_services, "_setVariable", &setVariable);
-    put(&runtime_services, "_getNextVariableName", &getNextVariableName);
-    put(&runtime_services, "_queryVariableInfo", &queryVariableInfo);
-    put(&runtime_services, "_getTime", &getTime);
-    put(&runtime_services, "_setTime", &setTime);
+    install(&runtime_services, .{
+        ._resetSystem = &resetSystem,
+        ._setVirtualAddressMap = &setVirtualAddressMap,
+        ._getVariable = &getVariable,
+        ._setVariable = &setVariable,
+        ._getNextVariableName = &getNextVariableName,
+        ._queryVariableInfo = &queryVariableInfo,
+        ._getTime = &getTime,
+        ._setTime = &setTime,
+    });
     runtime_services.hdr = .{
         .signature = tables.RuntimeServices.signature,
         .revision = tables.SystemTable.revision_2_70,
