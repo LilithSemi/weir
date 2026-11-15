@@ -26,28 +26,30 @@ pub const SMBIOS3_GUID = uefi.Guid{
     .node = .{ 0xe5, 0xbb, 0xcf, 0x20, 0xe3, 0x94 },
 };
 
-const assembled = tbl.assemble(board.info, .{
-    .major = @intCast(config.version.major),
-    .minor = @intCast(config.version.minor),
-    .patch = @intCast(config.version.patch),
-    .release_date = config.bios_date,
-    .soc_model = soc.model,
-    .cpu_model = soc.cpu_model,
-});
+fn assembled() tbl.Assembled {
+    return comptime tbl.assemble(board.info, .{
+        .major = @intCast(config.version.major),
+        .minor = @intCast(config.version.minor),
+        .patch = @intCast(config.version.patch),
+        .release_date = config.bios_date,
+        .soc_model = soc.model,
+        .cpu_model = soc.cpu_model,
+    });
+}
 
-var table: [assembled.bytes.len]u8 align(8) = assembled.bytes[0..assembled.bytes.len].*;
+var table: [assembled().bytes.len]u8 align(8) = assembled().bytes[0..assembled().bytes.len].*;
 
 var entry: structs.EntryPoint align(16) = .{
     .major = 3,
     .minor = 6,
-    .table_max_size = assembled.bytes.len,
+    .table_max_size = assembled().bytes.len,
     .table_address = 0,
 };
 
 /// Finish the tables for a machine with `ram_bytes` of RAM. Safe to call again.
 /// Call before publishing the config table.
 pub fn build(ram_bytes: u64) void {
-    tbl.patchRam(assembled, &table, ram_bytes);
+    tbl.patchRam(comptime assembled(), &table, ram_bytes);
     tbl.seal(&entry, @intFromPtr(&table));
 }
 

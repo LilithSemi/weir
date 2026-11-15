@@ -41,11 +41,14 @@ const handle = struct {
     const end: u16 = 0x7f00;
 };
 
-/// A fixed, recognizable UUID. The unit ID replaces it when the board has one.
+/// A fixed, recognizable UUID.
 const default_uuid = [16]u8{
     0x57, 0x65, 0x69, 0x72, 0x00, 0x01, 0x40, 0x00,
     0x80, 0x00, 0x52, 0x69, 0x76, 0x65, 0x72, 0x00,
 };
+
+/// The maker of the firmware and of the CPU core. A board file does not change it.
+const firmware_vendor = "Lilith Semiconductor";
 
 // Fixed-width strings that firmware can overwrite in place at boot.
 const system_serial_slot: [16]u8 = @splat('0');
@@ -107,7 +110,7 @@ pub fn assemble(comptime info: BoardInfo, comptime fw: Firmware) Assembled {
         var s: Strings = .{};
         const bios: structs.Bios = .{
             .header = .of(structs.Bios, handle.bios),
-            .vendor = s.add(info.vendor),
+            .vendor = s.add(firmware_vendor),
             .version = s.add(std.fmt.comptimePrint("Weir {d}.{d}.{d}", .{ fw.major, fw.minor, fw.patch })),
             .release_date = s.add(fw.release_date),
             .characteristics = structs.Bios.characteristics_not_supported,
@@ -161,11 +164,12 @@ pub fn assemble(comptime info: BoardInfo, comptime fw: Firmware) Assembled {
         const cores: u8 = if (info.cpu) |c| @intCast(@min(c.harts, 255)) else 0;
         const mhz: u16 = if (info.cpu) |c| @intCast(@min(c.clock_hz / 1_000_000, 0xffff)) else 0;
         const isa = if (info.cpu) |c| c.isa else "";
+        const model = if (info.cpu) |c| c.model else "";
         const processor: structs.Processor = .{
             .header = .of(structs.Processor, handle.processor),
             .socket = s.add("CPU0"),
-            .manufacturer = s.add(info.vendor),
-            .version = s.add(if (info.cpu) |c| c.model else fw.cpu_model),
+            .manufacturer = s.add(firmware_vendor),
+            .version = s.add(if (model.len > 0) model else fw.cpu_model),
             .max_speed_mhz = mhz,
             .current_speed_mhz = mhz,
             .serial = s.add("0"),
@@ -499,4 +503,23 @@ test "an empty board string becomes string 0 and keeps the later strings" {
     try std.testing.expectEqual(@as(u8, 5), system.formatted[0x1a]); // family
     try std.testing.expectEqualStrings("River", system.string(5));
     try std.testing.expectEqualStrings("River", find(a.bytes, 2, 0).?.string(2));
+}
+
+test "a board vendor does not rename the maker of the firmware or the CPU" {
+    const a = comptime assemble(.{ .vendor = "Acme Boards" }, test_fw);
+    try std.testing.expectEqualStrings("Lilith Semiconductor", find(a.bytes, 0, 0).?.string(1));
+    try std.testing.expectEqualStrings("Lilith Semiconductor", find(a.bytes, 4, 0).?.string(2));
+    try std.testing.expectEqualStrings("Acme Boards", find(a.bytes, 1, 0).?.string(1));
+    try std.testing.expectEqualStrings("Acme Boards", find(a.bytes, 2, 0).?.string(1));
+    try std.testing.expectEqualStrings("Acme Boards", find(a.bytes, 3, 0).?.string(1));
+}
+
+test "an empty CPU model falls back to the device tree model" {
+    const info: BoardInfo = .{ .cpu = .{ .model = "", .harts = 4 } };
+    const fw: Firmware = .{ .major = 0, .minor = 1, .patch = 0, .release_date = "01/01/2026", .cpu_model = "River Core" };
+    const a = comptime assemble(info, fw);
+    const cpu = find(a.bytes, 4, 0).?;
+    try std.testing.expectEqual(@as(u8, 3), cpu.formatted[0x10]); // version string number
+    try std.testing.expectEqualStrings("River Core", cpu.string(3));
+    try std.testing.expectEqual(@as(u8, 4), cpu.formatted[0x23]); // core count
 }

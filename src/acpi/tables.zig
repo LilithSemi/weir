@@ -29,7 +29,9 @@ pub fn rhct(buf: []u8, timebase: u64, isa: []const u8, mmu_type: u8) []const u8 
     const isa_off = @sizeOf(structs.RhctBody);
     const mmu_off = isa_off + isa_node_len;
     const hart_off = mmu_off + @sizeOf(structs.RhctMmuNode);
-    const body = buf[0 .. hart_off + @sizeOf(structs.RhctHartInfo)];
+    const len = hart_off + @sizeOf(structs.RhctHartInfo);
+    std.debug.assert(buf.len >= len);
+    const body = buf[0..len];
     @memset(body, 0);
 
     store(body, 0, structs.RhctBody{

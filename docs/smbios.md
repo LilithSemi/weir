@@ -3,8 +3,8 @@
 Weir publishes SMBIOS (DMI) tables so the OS can report the board identity. The
 code lives in `src/smbios/`.
 
-Weir builds a small SMBIOS 3.0 structure table and a 64-bit entry point. The OS
-finds the entry point through the SMBIOS3 GUID in the UEFI configuration table.
+Weir builds a small SMBIOS 3.6 structure table behind a 64-bit (SMBIOS 3)
+entry point. The OS finds the entry point through the SMBIOS3 GUID in the UEFI configuration table.
 Linux's DMI scanner reads it and fills `/sys/class/dmi/id`, so `dmidecode` and
 the kernel see real board information.
 
@@ -35,11 +35,11 @@ Every field is optional. Without the file, Weir uses its defaults and the
 
 | Field | SMBIOS use |
 | --- | --- |
-| `vendor` | Manufacturer in types 0, 1, 2, 3, 4 and 17. |
-| `product` | Product name in type 1. |
+| `vendor` | Manufacturer in types 1, 2, 3 and 17. Types 0 and 4 always name Lilith Semiconductor, the maker of the firmware and the core. |
+| `product` | Product name in type 1, and in type 2 when `board` is not set. |
 | `family`, `version`, `sku` | Type 1. |
 | `chassis_type` | Type 3, for example `.desktop` or `.embedded_pc`. |
-| `cpu` | Type 4: `model`, `isa`, `harts`, `clock_hz`. |
+| `cpu` | Type 4: `model`, `isa`, `harts`, `clock_hz`. An empty `model` uses the `model` of the device tree CPU node. |
 | `memory` | One type 17 for each entry: `type`, `form_factor`, `width_bits`, and `size_bytes` or `max_size_bytes`. |
 | `board` | `preset` is the type 2 product. `fpga_part` goes in a type 11 OEM string. |
 

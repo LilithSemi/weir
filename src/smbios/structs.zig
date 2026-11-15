@@ -147,7 +147,7 @@ pub const Processor = extern struct {
     manufacturer: String,
     id: u64 align(1) = 0,
     version: String,
-    /// Bit 7 set: legacy mode, no voltage value.
+    /// Bit 7 set: the low 7 bits hold the voltage times 10. 0x80 is 0.0 V.
     voltage: u8 = 0x80,
     external_clock_mhz: u16 align(1) = 0,
     max_speed_mhz: u16 align(1) = 0,
@@ -207,6 +207,9 @@ pub const MemoryType = enum(u8) {
     ddr2 = 0x13,
     ddr3 = 0x18,
     ddr4 = 0x1a,
+    lpddr4 = 0x1e,
+    ddr5 = 0x22,
+    lpddr5 = 0x23,
 };
 
 pub const FormFactor = enum(u8) {
@@ -286,4 +289,11 @@ test "a header takes its type and length from the structure" {
     try std.testing.expectEqual(@as(u8, 4), h.type);
     try std.testing.expectEqual(@as(u8, 0x2a), h.length);
     try std.testing.expectEqual(@as(u16, 0x0400), h.handle);
+}
+
+test "memory types carry their SMBIOS type 17 codes" {
+    try std.testing.expectEqual(@as(u8, 0x18), @intFromEnum(MemoryType.ddr3));
+    try std.testing.expectEqual(@as(u8, 0x1e), @intFromEnum(MemoryType.lpddr4));
+    try std.testing.expectEqual(@as(u8, 0x22), @intFromEnum(MemoryType.ddr5));
+    try std.testing.expectEqual(@as(u8, 0x23), @intFromEnum(MemoryType.lpddr5));
 }
