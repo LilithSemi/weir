@@ -112,6 +112,11 @@ pub fn build(b: *std.Build) void {
     // reaches a real userspace instead of panicking for lack of a root fs.
     const initrd_path = b.option(std.Build.LazyPath, "initrd", "Path to an initramfs (cpio.gz) to embed and serve via LoadFile2");
 
+    // Board identity for the SMBIOS tables. Harbor writes this file next to the
+    // device tree. Without it Weir uses its defaults and the device tree model.
+    const board_info_path = b.option(std.Build.LazyPath, "board-info", "Board identity (zon) for the SMBIOS tables");
+    const bios_date = b.option([]const u8, "bios-date", "SMBIOS BIOS release date, as MM/DD/YYYY") orelse "01/01/2026";
+
     const options = b.addOptions();
     options.addOption(bool, "has_aml", aml_path != null);
     options.addOption(bool, "has_dtb", dtb_path != null);
@@ -121,6 +126,8 @@ pub fn build(b: *std.Build) void {
     options.addOption(bool, "boot_manager", boot_manager);
     options.addOption(bool, "has_initrd", initrd_path != null);
     options.addOption(std.SemanticVersion, "version", weir_version);
+    options.addOption(bool, "has_board_info", board_info_path != null);
+    options.addOption([]const u8, "bios_date", bios_date);
 
     const mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -161,6 +168,7 @@ pub fn build(b: *std.Build) void {
     // cwd_relative so an absolute path (e.g. a Nix store EFI binary) also works.
     if (pe_app_path) |p| mod.addAnonymousImport("weir_pe_app", .{ .root_source_file = p });
     if (initrd_path) |p| mod.addAnonymousImport("weir_initrd", .{ .root_source_file = p });
+    if (board_info_path) |p| mod.addAnonymousImport("board_info", .{ .root_source_file = p });
 
     if (payload_path) |lp| {
         mod.addAnonymousImport("weir_payload", .{ .root_source_file = lp });

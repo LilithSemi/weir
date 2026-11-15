@@ -29,3 +29,6 @@ pub const boot_manager: bool = options.boot_manager;
 pub const initrd: ?[]const u8 = if (options.has_initrd) @embedFile("weir_initrd")[0..] else null;
 
 pub const version: std.SemanticVersion = options.version;
+
+/// The BIOS release date the SMBIOS tables report, as MM/DD/YYYY.
+pub const bios_date: []const u8 = options.bios_date;

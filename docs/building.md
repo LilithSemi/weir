@@ -36,3 +36,5 @@ zig build -Ddtb=board.dtb
 | `-Ddisk-boot` | Read the boot PE off a disk, not an embedded blob. |
 | `-Dboot-manager` | Boot through the ESP boot manager (GPT, FAT, BootOrder). |
 | `-Dinitrd=PATH` | An initramfs to serve the kernel through LoadFile2. |
+| `-Dboard-info=PATH` | Board identity (zon) for the SMBIOS tables. See [smbios.md](smbios.md). |
+| `-Dbios-date=DATE` | SMBIOS BIOS release date, as MM/DD/YYYY. |
