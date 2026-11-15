@@ -206,6 +206,7 @@ pub fn build(b: *std.Build) void {
     const pure_tests = [_][]const u8{
         "src/acpi/madt.zig",
         "src/smbios/structs.zig",
+        "src/smbios/table.zig",
     };
     for (pure_tests) |path| {
         const t = b.addTest(.{

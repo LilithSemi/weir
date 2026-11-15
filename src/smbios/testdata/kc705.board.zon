@@ -1,0 +1,9 @@
+.{
+    .product = "River KC705",
+    .family = "river",
+    .cpu = .{ .model = "River RV64", .isa = "rv64imac", .harts = 2, .clock_hz = 50000000 },
+    .memory = .{
+        .{ .type = .ddr3, .form_factor = .sodimm, .width_bits = 64, .max_size_bytes = 0x40000000 },
+    },
+    .board = .{ .preset = "kc705", .fpga_part = "xc7k325t-ffg900" },
+}
