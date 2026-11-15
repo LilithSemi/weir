@@ -3,6 +3,7 @@
 //! The `-Daml=PATH` and `-Ddtb=PATH` options embed an ACPI DSDT or a device
 //! tree. Weir then uses a platform-provided description instead of generating one.
 
+const std = @import("std");
 const options = @import("build_options");
 
 /// Firmware-provided ACPI DSDT (raw AML), or null if none was supplied.
@@ -26,3 +27,5 @@ pub const boot_manager: bool = options.boot_manager;
 
 /// Initramfs to serve the Linux kernel via LoadFile2, or null.
 pub const initrd: ?[]const u8 = if (options.has_initrd) @embedFile("weir_initrd")[0..] else null;
+
+pub const version: std.SemanticVersion = options.version;

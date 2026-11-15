@@ -11,7 +11,17 @@
 //! bits the spec is still ratifying.
 
 const std = @import("std");
+const soc = @import("soc");
+const config = @import("../config.zig");
 const uefi = std.os.uefi;
+
+/// BIOS Version string the OS reads from DMI, e.g. "Weir 0.1.0". The version
+/// comes from build.zig (the -Dversion option or build.zig.zon).
+const bios_version = std.fmt.comptimePrint("Weir {d}.{d}.{d}", .{
+    config.version.major,
+    config.version.minor,
+    config.version.patch,
+});
 
 // SMBIOS3_TABLE_GUID f2fd1544-9794-4a2c-992e-e5bbcf20e394.
 pub const SMBIOS3_GUID = uefi.Guid{
@@ -85,22 +95,22 @@ pub fn build(ram_bytes: u64) void {
     // Type 0 - BIOS Information.
     header(0, 0x18, 0x0000);
     put8(1); // Vendor -> "Lilith Semiconductor"
-    put8(2); // BIOS Version -> "Weir 0.1"
+    put8(2); // BIOS Version -> bios_version
     put16(0); // BIOS starting address segment (n/a)
     put8(3); // BIOS Release Date -> string
     put8(0); // BIOS ROM size in 64 KiB units of (n+1). 0 means 64 KiB
     put64(1 << 3); // Characteristics: bit 3 = BIOS Characteristics Not Supported
     put16(0); // characteristics extension bytes 1-2
-    put8(VERSION_MAJOR); // System BIOS major release
-    put8(1); // System BIOS minor release
+    put8(@intCast(config.version.major)); // System BIOS major release
+    put8(@intCast(config.version.minor)); // System BIOS minor release
     put8(0xff); // EC firmware major (none)
     put8(0xff); // EC firmware minor (none)
-    strings(&.{ "Lilith Semiconductor", "Weir 0.1", "01/01/2026" });
+    strings(&.{ "Lilith Semiconductor", bios_version, "01/01/2026" });
 
     // Type 1 - System Information.
     header(1, 0x1b, 0x0100);
     put8(1); // Manufacturer -> "Lilith Semiconductor"
-    put8(2); // Product Name -> "River"
+    put8(2); // Product Name
     put8(3); // Version
     put8(4); // Serial Number
     // UUID: a fixed, recognizable value for our virtual board.
@@ -113,7 +123,7 @@ pub fn build(ram_bytes: u64) void {
     put8(0x06); // Wake-up Type: Power Switch
     put8(5); // SKU Number
     put8(6); // Family
-    strings(&.{ "Lilith Semiconductor", "River", "1.0", "0", "0", "River" });
+    strings(&.{ "Lilith Semiconductor", soc.model, "1.0", "0", "0", "River" });
 
     // Type 2 - Baseboard.
     header(2, 0x0f, 0x0200);
@@ -127,7 +137,7 @@ pub fn build(ram_bytes: u64) void {
     put16(0x0300); // Chassis Handle
     put8(0x0a); // Board Type: Motherboard
     put8(0); // Number of contained object handles
-    strings(&.{ "Lilith Semiconductor", "River Mainboard", "1.0", "0", "0", "Onboard" });
+    strings(&.{ "Lilith Semiconductor", soc.model, "1.0", "0", "0", "Onboard" });
 
     // Type 3 - Chassis.
     header(3, 0x15, 0x0300);
@@ -172,7 +182,7 @@ pub fn build(ram_bytes: u64) void {
     put8(0); // Thread Count: unknown
     put16(0x0004); // Processor Characteristics: 64-bit Capable
     put16(0x0201); // Processor Family 2: RISC-V RV64 (proposed code)
-    strings(&.{ "CPU0", "Lilith Semiconductor", "River", "0", "0", "River-RV64" });
+    strings(&.{ "CPU0", "Lilith Semiconductor", soc.cpu_model, "0", "0", "River-RV64" });
 
     // Type 16 - Physical Memory Array.
     header(16, 0x17, 0x1000);

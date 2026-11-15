@@ -25,6 +25,8 @@ const mem = @import("../mem.zig");
 const tpm = @import("../tpm/tpm.zig");
 const tcg2 = @import("../tpm/tcg2.zig");
 const time = @import("../time.zig");
+const copy_mem = @import("copy_mem.zig");
+const config = @import("../config.zig");
 
 const Status = uefi.Status;
 const tables = uefi.tables;
@@ -573,7 +575,10 @@ fn allocatePages(alloc_type: u32, mem_type: u32, pages: usize, memory: *usize) c
         reserveRegion(req, req + size);
         return ok;
     }
-    const addr = bumpAlloc(size, 4096) orelse return @backingInt(Status.out_of_resources);
+    // Linux reserves its image up to the next 2 MiB boundary. A large
+    // allocation that starts below that boundary would overlap it.
+    const alignment: usize = if (size >= 0x200000) 0x200000 else 4096;
+    const addr = bumpAlloc(size, alignment) orelse return @backingInt(Status.out_of_resources);
     memory.* = addr;
     if (trace) console.out.print("[uefi]   -> pages at {x}\n", .{addr}) catch {};
     return ok;
@@ -688,11 +693,9 @@ fn getMemoryMap(
 }
 
 fn copyMem(dest: [*]u8, src: [*]const u8, len: usize) callconv(.c) void {
-    // UEFI CopyMem must handle overlapping regions (memmove semantics): the
-    // Linux EFI stub routes its memmove through here, and libfdt relies on the
-    // overlap-safe direction. @memmove is overlap-safe and word-wide, so it does
-    // not pay a per-byte store (a byte loop crawls on the slow-write DDR fabric).
-    @memmove(dest[0..len], src[0..len]);
+    // The Linux EFI stub routes memmove through CopyMem; preserve overlap
+    // semantics while using aligned 64-bit operations on the River DDR path.
+    copy_mem.copyMem(dest, src, len);
 }
 
 fn setMem(buffer: [*]u8, size: usize, value: u8) callconv(.c) void {
@@ -813,7 +816,8 @@ fn loadImage( // zippy:ignore too_many_params UEFI LoadImage ABI is fixed
         const sbuf = @as([*]u8, @ptrFromInt(scratch))[0..fsize];
         // A multi-MiB image over polled SPI takes many seconds. Announce the read
         // so a slow load reads as progress, not a hang.
-        const got = fat.readFile(path, sbuf) orelse return @backingInt(Status.device_error);
+        const got_opt = fat.readFile(path, sbuf);
+        const got = got_opt orelse return @backingInt(Status.device_error);
         if (got != fsize) return @backingInt(Status.device_error);
         break :blk sbuf;
     };
@@ -850,6 +854,10 @@ fn loadImage( // zippy:ignore too_many_params UEFI LoadImage ABI is fixed
     addProtocol(h, &uefi.protocol.LoadedImage.guid, &slot.li);
     out_handle.* = @ptrCast(h);
     return ok;
+}
+
+fn ticksToUs(ticks: u64) u64 {
+    return if (soc.timebase_hz == 0) 0 else ticks * 1_000_000 / soc.timebase_hz;
 }
 
 /// StartImage: enter a loaded image in S-mode, exactly as an EFI loader would,
@@ -1388,7 +1396,10 @@ pub fn prepare(dtb: usize, hartid: usize, image_base: usize, image_size: usize) 
             .reserved = 0,
         },
         .firmware_vendor = &vendor,
-        .firmware_revision = 0x00010001,
+        // Major in the high 16 bits, minor in the low 16, the usual layout an
+        // OS reads from the system table.
+        .firmware_revision = @as(u32, @intCast(config.version.major)) << 16 |
+            @as(u32, @intCast(config.version.minor)),
         .console_in_handle = imageHandle(),
         .con_in = &con_in,
         .console_out_handle = imageHandle(),

@@ -25,6 +25,10 @@ stdenv.mkDerivation (finalAttrs: {
     ln -s ${finalAttrs.zigDeps} "$ZIG_GLOBAL_CACHE_DIR/p"
   '';
 
+  zigBuildFlags = [
+    "-Dversion=${finalAttrs.version}"
+  ];
+
   passthru.shell = mkShell {
     name = "weir-dev-shell";
 

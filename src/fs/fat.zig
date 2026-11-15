@@ -243,32 +243,6 @@ fn findInDir(s: *State, dir: Dir, name: []const u8) ?Entry {
     }
 }
 
-/// Read a file's cluster chain into `buf`, up to its size. Returns bytes read.
-fn readChain(s: *State, start_cluster: u32, size: u32, buf: []u8) ?usize {
-    if (size > buf.len) return null;
-    const cluster_bytes = s.sectors_per_cluster * 512;
-    var cluster = start_cluster;
-    var written: usize = 0;
-    while (written < size) {
-        if (eoc(s, cluster) or cluster < 2) break;
-        const sector = clusterToSector(s, cluster);
-        var ss: u32 = 0;
-        while (ss < s.sectors_per_cluster and written < size) : (ss += 1) {
-            const chunk = @min(@as(usize, 512), size - written);
-            if (chunk == 512) {
-                if (!s.part.readBlocks(sector + ss, 1, buf[written..][0..512])) return null;
-            } else {
-                if (!s.part.readBlocks(sector + ss, 1, &sector_buf)) return null;
-                @memcpy(buf[written..][0..chunk], sector_buf[0..chunk]);
-            }
-            written += chunk;
-        }
-        _ = cluster_bytes;
-        cluster = nextCluster(s, cluster);
-    }
-    return written;
-}
-
 // --- Primitives for the Simple File System / File protocols -----------------
 
 /// Directory location: FAT12/16 fixed root, or a cluster chain.
@@ -411,9 +385,64 @@ var rr_start: u32 = 0;
 var rr_offset: u64 = 0;
 var rr_cluster: u32 = 0;
 
-pub fn readRegion(start_cluster: u32, size: u32, offset: u64, buf: []u8) usize {
+const SectorRun = struct {
+    lba: u32,
+    blocks: u32,
+    last_cluster: u32,
+    end_in_cluster: u64,
+};
+
+/// Extend an aligned sector read across physically adjacent FAT clusters. A
+/// FAT chain often describes a long contiguous file extent; reading each FAT
+/// cluster separately would turn a multi-block DMA read into one command per
+/// cluster when the filesystem uses one-sector clusters.
+fn contiguousSectorRun(
+    s: *const State,
+    cluster: u32,
+    in_cluster: u64,
+    max_blocks: u32,
+) SectorRun {
+    const first_index: u32 = @intCast(in_cluster / 512);
+    const lba = clusterToSector(s, cluster) + first_index;
+    var current = cluster;
+    var index = first_index;
+    var blocks: u32 = 0;
+    var remaining = max_blocks;
+    var end_in_cluster = in_cluster;
+
+    while (remaining > 0) {
+        const available = s.sectors_per_cluster - index;
+        const take = @min(available, remaining);
+        blocks += take;
+        remaining -= take;
+        end_in_cluster = @as(u64, index + take) * 512;
+        if (remaining == 0 or take < available) break;
+
+        const next = nextCluster(s, current);
+        if (next < 2 or eoc(s, next)) break;
+        if (clusterToSector(s, next) != lba + blocks) break;
+
+        current = next;
+        index = 0;
+        end_in_cluster = 0;
+    }
+
+    return .{
+        .lba = lba,
+        .blocks = blocks,
+        .last_cluster = current,
+        .end_in_cluster = end_in_cluster,
+    };
+}
+
+const RegionRead = struct {
+    bytes: usize,
+    io_error: bool = false,
+};
+
+fn readRegionImpl(start_cluster: u32, size: u32, offset: u64, buf: []u8) RegionRead {
     const s = &state;
-    if (offset >= size) return 0;
+    if (offset >= size) return .{ .bytes = 0 };
     const cluster_bytes: u64 = @as(u64, s.sectors_per_cluster) * 512;
 
     // Resume if this read continues the last one. Otherwise walk to the offset.
@@ -424,7 +453,7 @@ pub fn readRegion(start_cluster: u32, size: u32, offset: u64, buf: []u8) usize {
         cluster = start_cluster;
         var skip = offset;
         while (skip >= cluster_bytes) : (skip -= cluster_bytes) {
-            if (eoc(s, cluster) or cluster < 2) return 0;
+            if (eoc(s, cluster) or cluster < 2) return .{ .bytes = 0 };
             cluster = nextCluster(s, cluster);
         }
     }
@@ -433,30 +462,30 @@ pub fn readRegion(start_cluster: u32, size: u32, offset: u64, buf: []u8) usize {
     var pos = offset;
     while (produced < buf.len and pos < size) {
         if (eoc(s, cluster) or cluster < 2) break;
-        const sector = clusterToSector(s, cluster);
         var in_cluster = pos % cluster_bytes;
         while (in_cluster < cluster_bytes and produced < buf.len and pos < size) {
             const remaining = @min(@as(u64, buf.len - produced), size - pos);
             const want = @min(cluster_bytes - in_cluster, remaining);
             if (in_cluster % 512 == 0 and want >= 512) {
-                // Aligned run: read whole sectors straight into the caller's
-                // buffer in one multi-sector request, no bounce.
-                const nsec: u32 = @intCast(want / 512);
-                const sec_idx: u32 = @intCast(in_cluster / 512);
-                const nbytes = nsec * 512;
-                if (!s.part.readBlocks(sector + sec_idx, nsec, buf[produced..][0..nbytes])) {
+                // Continue through adjacent clusters too. The block driver
+                // chunks this request at its verified ADMA limit.
+                const max_blocks: u32 = @intCast(remaining / 512);
+                const run = contiguousSectorRun(s, cluster, in_cluster, max_blocks);
+                const nbytes = run.blocks * 512;
+                if (!s.part.readBlocks(run.lba, run.blocks, buf[produced..][0..nbytes])) {
                     rr_valid = false;
-                    return produced;
+                    return .{ .bytes = produced, .io_error = true };
                 }
                 produced += nbytes;
                 pos += nbytes;
-                in_cluster += nbytes;
+                cluster = run.last_cluster;
+                in_cluster = run.end_in_cluster;
             } else {
                 // Unaligned head/tail: bounce one sector.
                 const sec_idx: u32 = @intCast(in_cluster / 512);
-                if (!s.part.readBlocks(sector + sec_idx, 1, &sector_buf)) {
+                if (!s.part.readBlocks(clusterToSector(s, cluster) + sec_idx, 1, &sector_buf)) {
                     rr_valid = false;
-                    return produced;
+                    return .{ .bytes = produced, .io_error = true };
                 }
                 const sec_off: usize = @intCast(in_cluster % 512);
                 const avail = @min(@as(u64, 512 - sec_off), want);
@@ -476,7 +505,11 @@ pub fn readRegion(start_cluster: u32, size: u32, offset: u64, buf: []u8) usize {
     rr_start = start_cluster;
     rr_offset = pos;
     rr_cluster = cluster;
-    return produced;
+    return .{ .bytes = produced };
+}
+
+pub fn readRegion(start_cluster: u32, size: u32, offset: u64, buf: []u8) usize {
+    return readRegionImpl(start_cluster, size, offset, buf).bytes;
 }
 
 /// Resolve `path` to a regular file's directory entry on the mounted volume, or
@@ -501,7 +534,13 @@ fn resolve(s: *State, path: []const u8) ?Entry {
 fn readFileImpl(ctx: *anyopaque, path: []const u8, buf: []u8) ?usize {
     const s: *State = @ptrCast(@alignCast(ctx));
     const f = resolve(s, path) orelse return null;
-    return readChain(s, f.cluster, f.size, buf);
+    if (f.size > buf.len) return null;
+
+    const result = readRegionImpl(f.cluster, f.size, 0, buf);
+    if (result.io_error) return null;
+    // Match readChain for a malformed short FAT chain: return existing bytes.
+    // Callers can detect truncation by comparing this count with fileSize().
+    return result.bytes;
 }
 
 /// File size in bytes of `path` on the mounted volume, or null if absent. The

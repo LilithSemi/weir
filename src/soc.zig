@@ -349,6 +349,40 @@ fn readCpuIsa() []const u8 {
     return fallback;
 }
 
+// The board name and the core name, for the SMBIOS tables. The root `model`
+// names the board. A `model` in the cpu node names the core.
+pub const model: []const u8 = if (has_dt) readModel(.root, "River") else "River";
+pub const cpu_model: []const u8 = if (has_dt) readModel(.cpu, "River") else "River";
+
+fn readModel(comptime where: enum { root, cpu }, comptime fallback: []const u8) []const u8 {
+    @setEvalBranchQuota(8_000_000);
+    var rd = conduit.dtree.Reader.initBuffer(@embedFile("soc_dtb")) catch return fallback;
+    var it = rd.nodeIterator();
+    var depth: usize = 0;
+    var root_depth: ?usize = null;
+    var in_cpu = false;
+    while (it.next() catch return fallback) |node| switch (node) {
+        .begin => |bg| {
+            depth = bg.depth;
+            if (root_depth == null) root_depth = bg.depth;
+            in_cpu = std.mem.startsWith(u8, bg.name, "cpu@");
+        },
+        .prop => |p| {
+            const here = switch (where) {
+                .root => p.depth == root_depth.? + 1,
+                .cpu => in_cpu and p.depth == depth + 1,
+            };
+            if (here and std.mem.eql(u8, p.name, "model")) {
+                const v = p.value;
+                const s = if (v.len > 0 and v[v.len - 1] == 0) v[0 .. v.len - 1] else v;
+                return if (s.len > 0) s else fallback;
+            }
+        },
+        .end => {},
+    };
+    return fallback;
+}
+
 // The hart's virtual-memory scheme, read from the device tree (cpu node's
 // `mmu-type`), for the ACPI RHCT MMU node. An OS needs it to set up paging.
 // 0 = Sv39, 1 = Sv48, 2 = Sv57.

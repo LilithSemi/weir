@@ -28,6 +28,14 @@ fn genLd(
 pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
+    const version_text = b.option(
+        []const u8,
+        "version",
+        "What this build calls itself, as a semantic version. Defaults to build.zig.zon.",
+    ) orelse @import("build.zig.zon").version;
+
+    const weir_version = std.SemanticVersion.parse(version_text) catch @panic("Version in build.zig.zon should parse");
+
     // RISC-V firmware: freestanding, M-mode capable, soft-float (no F/D so we
     // never have to manage the FPU before handing off). medany code model (set
     // per-module below) is required because we link at 0x80000000.
@@ -112,6 +120,7 @@ pub fn build(b: *std.Build) void {
     options.addOption(bool, "disk_boot", disk_boot);
     options.addOption(bool, "boot_manager", boot_manager);
     options.addOption(bool, "has_initrd", initrd_path != null);
+    options.addOption(std.SemanticVersion, "version", weir_version);
 
     const mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -213,6 +222,20 @@ pub fn build(b: *std.Build) void {
         .target = b.graph.host,
         .optimize = optimize,
     }).module("conduit");
+
+    const fat_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/fat_read_region_test.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    fat_test_mod.addImport("conduit", conduit_host);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = fat_test_mod })).step);
+    const copy_mem_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/uefi/copy_mem.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = copy_mem_test_mod })).step);
     const soc_test_mod = b.createModule(.{
         .root_source_file = b.path("src/soc.zig"),
         .target = b.graph.host,
