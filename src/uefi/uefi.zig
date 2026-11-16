@@ -135,9 +135,14 @@ const RiscvBootProtocol = extern struct {
 // prepare() sets it up. Until then it holds no memory.
 var pages: page_alloc.PageAllocator = .init(0, 0);
 var pool: page_alloc.Pool = .init(&pages);
-var map_key_seq: usize = 1;
 
 const Region = struct { start: usize, end: usize };
+
+// The first image, below the pool. The memory map reports it as loader code.
+var first_image: Region = .{ .start = 0, .end = 0 };
+
+const image_tag: page_alloc.Tag = .{ .kind = .loader_code, .owner = .firmware };
+const boot_data_tag: page_alloc.Tag = .{ .kind = .boot_services_data, .owner = .firmware };
 
 /// The page pool base for a first image that ends at `image_end`. The small
 /// layout has no fixed base. There the pool starts after the image, 2 MiB aligned.
@@ -176,6 +181,8 @@ const LoadedImage = struct {
     entry: usize = 0,
     /// The pool block that holds the image.
     block: Region = .{ .start = 0, .end = 0 },
+    /// UnloadImage keeps the block of a started image, as its code can still run.
+    started: bool = false,
     li: uefi.protocol.LoadedImage = undefined, // zippy:ignore unsafe_undefined
 };
 var loaded_images: [MAX_LOADED_IMAGES]LoadedImage = undefined;
@@ -303,7 +310,7 @@ fn locateHandleBuffer(
     const n = handledb.locateHandles(g, &tmp);
     if (n == 0) return not_found;
     var out: ?*anyopaque = null;
-    if (allocatePool(0, n * @sizeOf(uefi.Handle), &out) != ok) {
+    if (allocatePool(@backingInt(tables.MemoryType.boot_services_data), n * @sizeOf(uefi.Handle), &out) != ok) {
         return @backingInt(Status.out_of_resources);
     }
     const handles: [*]uefi.Handle = @ptrCast(@alignCast(out.?));
@@ -538,8 +545,8 @@ fn outString(self: *uefi.protocol.SimpleTextOutput, str: [*:0]const u16) callcon
 
 fn allocatePool(pool_type: u32, size: usize, buffer: *?*anyopaque) callconv(.c) usize {
     tr("allocatePool");
-    _ = pool_type;
-    const addr = pool.alloc(size) orelse return @backingInt(Status.out_of_resources);
+    const kind = page_alloc.Kind.fromEfi(pool_type) orelse return @backingInt(Status.invalid_parameter);
+    const addr = pool.alloc(size, kind) orelse return @backingInt(Status.out_of_resources);
     buffer.* = @ptrFromInt(addr);
     if (trace) console.out.print("[uefi]   -> pool at {x} size={d}\n", .{ addr, size }) catch {};
     return ok;
@@ -552,7 +559,8 @@ fn freePool(buffer: *anyopaque) callconv(.c) usize {
 }
 
 fn allocatePages(alloc_type: u32, mem_type: u32, page_count: usize, memory: *usize) callconv(.c) usize {
-    _ = mem_type;
+    const kind = page_alloc.Kind.fromEfi(mem_type) orelse return @backingInt(Status.invalid_parameter);
+    const tag: page_alloc.Tag = .{ .kind = kind, .owner = .caller };
     const out_of_resources = @backingInt(Status.out_of_resources);
     if (trace) console.out.print(
         "[uefi] allocatePages type={d} pages={d} at={x}\n",
@@ -572,26 +580,29 @@ fn allocatePages(alloc_type: u32, mem_type: u32, page_count: usize, memory: *usi
             const end = std.math.add(usize, req, size) catch return out_of_resources;
             if (req < FW_RESERVED_END or end > RAM_END) return out_of_resources;
             if (poolPart(req, end)) |p| {
-                if (!pages.allocAt(p.start, p.end - p.start)) return not_found;
+                if (!pages.allocAt(p.start, p.end - p.start, tag)) return not_found;
             }
             if (trace) console.out.print("[uefi]   -> pages at {x}\n", .{req}) catch {};
             return ok;
         },
         else => return @backingInt(Status.invalid_parameter),
     };
-    const addr = pages.alloc(size, pageAlignment(size), limit) orelse return out_of_resources;
+    const addr = pages.alloc(size, pageAlignment(size), limit, tag) orelse return out_of_resources;
     memory.* = addr;
     if (trace) console.out.print("[uefi]   -> pages at {x}\n", .{addr}) catch {};
     return ok;
 }
 
-// A range outside the pool is accepted and left alone.
+// A range outside the pool is accepted and left alone. In the pool, only pages
+// that AllocatePages gave out can be freed.
 fn freePages(memory: usize, page_count: usize) callconv(.c) usize {
     if (trace) console.out.print("[uefi] freePages at={x} pages={d}\n", .{ memory, page_count }) catch {};
     if (memory % 4096 != 0) return @backingInt(Status.invalid_parameter);
     const size = std.math.mul(usize, page_count, 4096) catch return @backingInt(Status.invalid_parameter);
     const end = std.math.add(usize, memory, size) catch return @backingInt(Status.invalid_parameter);
-    if (poolPart(memory, end)) |p| pages.free(p.start, p.end - p.start);
+    if (poolPart(memory, end)) |p| {
+        if (!pages.free(p.start, p.end - p.start, .caller)) return not_found;
+    }
     return ok;
 }
 
@@ -608,6 +619,100 @@ fn runtimeRegion() ?rt.Bounds {
     return if (in_place) r else null;
 }
 
+// EFI_MEMORY_WB: ordinary writeback cacheable RAM. EFI_MEMORY_RUNTIME: the OS
+// maps the range to call the runtime services.
+const attr_wb: u64 = 0x8;
+const attr_runtime: u64 = 1 << 63;
+
+/// Builds the memory map. With no buffer it only counts, so the size query and
+/// the fill give the same map. A descriptor joins its lower neighbour when both
+/// have the same type and attributes.
+const MapWriter = struct {
+    out: ?[*]tables.MemoryDescriptor,
+    count: usize = 0,
+    last_type: tables.MemoryType = .reserved_memory_type,
+    last_attr: u64 = 0,
+    last_end: usize = 0,
+
+    fn add(w: *MapWriter, t: tables.MemoryType, start: usize, end: usize, attr: u64) void {
+        std.debug.assert(start <= end);
+        if (start == end) return;
+        // The map has no gap and no overlap, from RAM_BASE through the pool.
+        std.debug.assert(start == if (w.count == 0) RAM_BASE else w.last_end);
+        const n = (end - start) / 4096;
+        if (w.count > 0 and t == w.last_type and attr == w.last_attr and start == w.last_end) {
+            if (w.out) |o| o[w.count - 1].number_of_pages += n;
+        } else {
+            if (w.out) |o| o[w.count] = .{
+                .type = t,
+                .physical_start = start,
+                .virtual_start = 0,
+                .number_of_pages = n,
+                .attribute = @bitCast(attr),
+            };
+            w.count += 1;
+        }
+        w.last_type = t;
+        w.last_attr = attr;
+        w.last_end = end;
+    }
+};
+
+fn memoryType(kind: page_alloc.Kind) tables.MemoryType {
+    return switch (kind) {
+        .reserved => .reserved_memory_type,
+        .loader_code => .loader_code,
+        .loader_data => .loader_data,
+        .boot_services_code => .boot_services_code,
+        .boot_services_data => .boot_services_data,
+        .runtime_services_code => .runtime_services_code,
+        .runtime_services_data => .runtime_services_data,
+        .acpi_reclaim => .acpi_reclaim_memory,
+        .acpi_nvs => .acpi_memory_nvs,
+    };
+}
+
+fn writeMap(w: *MapWriter) void {
+    const have_acpi = acpi_qemu.rsdp() != 0;
+    // In the small layout the ACPI pool is the top of the firmware window.
+    const acpi_in_window = mem.acpi_pool_base < FW_RESERVED_END;
+    const reserved_end = if (have_acpi and acpi_in_window) acpi_qemu.POOL_BASE else FW_RESERVED_END;
+    const acpi_end = acpi_qemu.POOL_BASE + acpi_qemu.POOL_SIZE;
+
+    // The running firmware: reserved so the OS never reclaims it. The OS maps
+    // the runtime code and data to call the variable services.
+    if (runtimeRegion()) |r| {
+        w.add(.reserved_memory_type, RAM_BASE, r.text_start, attr_wb);
+        w.add(.runtime_services_code, r.text_start, r.text_end, attr_wb | attr_runtime);
+        w.add(.runtime_services_data, r.data_start, r.data_end, attr_wb | attr_runtime);
+        w.add(.reserved_memory_type, r.data_end, reserved_end, attr_wb);
+    } else {
+        w.add(.reserved_memory_type, RAM_BASE, reserved_end, attr_wb);
+    }
+    // The linked ACPI tables: reclaimable once the OS has parsed them.
+    if (have_acpi and acpi_in_window) w.add(.acpi_reclaim_memory, acpi_qemu.POOL_BASE, acpi_end, attr_wb);
+    // Low boot allocations up to the ACPI pool if present. The first image in
+    // this region is loader code.
+    const bsd_end = if (have_acpi and !acpi_in_window) acpi_qemu.POOL_BASE else page_pool_base;
+    const image_start = @min(@max(first_image.start, FW_RESERVED_END), bsd_end);
+    const image_end = @min(@max(first_image.end, image_start), bsd_end);
+    w.add(.boot_services_data, FW_RESERVED_END, image_start, attr_wb);
+    w.add(.loader_code, image_start, image_end, attr_wb);
+    w.add(.boot_services_data, image_end, bsd_end, attr_wb);
+    if (have_acpi and !acpi_in_window) w.add(.acpi_reclaim_memory, acpi_qemu.POOL_BASE, acpi_end, attr_wb);
+    // The pool: free memory is conventional, allocated memory has its tag.
+    var it = pages.walk();
+    while (it.next()) |s| {
+        const tag = s.tag orelse {
+            w.add(.conventional_memory, s.start, s.end, attr_wb);
+            continue;
+        };
+        const runtime = tag.kind == .runtime_services_code or tag.kind == .runtime_services_data;
+        w.add(memoryType(tag.kind), s.start, s.end, if (runtime) attr_wb | attr_runtime else attr_wb);
+    }
+}
+
+// The map key is the allocator generation, so any change to the map gives a new key.
 fn getMemoryMap(
     mmap_size: *usize,
     mmap: ?[*]u8,
@@ -616,112 +721,20 @@ fn getMemoryMap(
     desc_ver: *u32,
 ) callconv(.c) usize {
     tr("getMemoryMap");
-    const dsize = @sizeOf(tables.MemoryDescriptor);
-    const have_acpi = acpi_qemu.rsdp() != 0;
-
-    // Carve the live initrd (page-rounded) out of conventional memory so the OS
-    // cannot allocate over it before the stub fetches it via LoadFile2. Marked
-    // boot-services-data: protected during boot services, reclaimable after
-    // ExitBootServices (by when the stub has copied it out). When present it
-    // splits the free region, adding two descriptors.
-    const ir: ?Region = blk: {
-        if (initrd.region()) |r| {
-            const s = r.base & ~@as(usize, 4095);
-            const e = (r.base + r.len + 4095) & ~@as(usize, 4095);
-            if (s >= page_pool_base and e <= RAM_END and e > s) {
-                break :blk .{ .start = s, .end = e };
-            }
-        }
-        break :blk null;
-    };
-
-    // base: firmware-reserved, split in four by the runtime code and data when
-    // the region is in place, then boot-services-data. Plus ACPI reclaim if
-    // linked, plus the free region(s): one normally, three when the initrd
-    // splits them.
-    const region = runtimeRegion();
-    // In the small layout the ACPI pool is the top of the firmware window.
-    const acpi_in_window = mem.acpi_pool_base < FW_RESERVED_END;
-    const reserved_end = if (have_acpi and acpi_in_window) acpi_qemu.POOL_BASE else FW_RESERVED_END;
-    const firmware_descs: usize = if (region != null) 4 else 1;
-    const acpi_descs: usize = if (have_acpi) 1 else 0;
-    const free_descs: usize = if (ir != null) 3 else 1;
-    const count: usize = firmware_descs + 1 + acpi_descs + free_descs;
-    const needed = count * dsize;
-    desc_size.* = dsize;
+    var counter: MapWriter = .{ .out = null };
+    writeMap(&counter);
+    const needed = counter.count * @sizeOf(tables.MemoryDescriptor);
+    desc_size.* = @sizeOf(tables.MemoryDescriptor);
     desc_ver.* = 1;
     if (mmap == null or mmap_size.* < needed) {
         mmap_size.* = needed;
         return @backingInt(Status.buffer_too_small);
     }
-
-    // EFI_MEMORY_WB: ordinary writeback-cacheable RAM.
-    const attr: tables.MemoryDescriptorAttribute = @bitCast(@as(u64, 0x8));
-    const descs: [*]tables.MemoryDescriptor = @ptrCast(@alignCast(mmap.?));
-    var next: usize = 0;
-    const emit = struct {
-        fn d(
-            slot: *tables.MemoryDescriptor,
-            t: tables.MemoryType,
-            start: usize,
-            end: usize,
-            a: tables.MemoryDescriptorAttribute,
-        ) void {
-            slot.* = .{
-                .type = t,
-                .physical_start = start,
-                .virtual_start = 0,
-                .number_of_pages = (end - start) / 4096,
-                .attribute = a,
-            };
-        }
-    }.d;
-
-    // The running firmware: reserved so the OS never reclaims it. The OS maps
-    // the runtime code and data (EFI_MEMORY_RUNTIME) to call the variable services.
-    if (region) |r| {
-        const runtime: tables.MemoryDescriptorAttribute = @bitCast(@as(u64, 0x8 | 1 << 63));
-        emit(&descs[next], .reserved_memory_type, RAM_BASE, r.text_start, attr);
-        next += 1;
-        emit(&descs[next], .runtime_services_code, r.text_start, r.text_end, runtime);
-        next += 1;
-        emit(&descs[next], .runtime_services_data, r.data_start, r.data_end, runtime);
-        next += 1;
-        emit(&descs[next], .reserved_memory_type, r.data_end, reserved_end, attr);
-        next += 1;
-    } else {
-        emit(&descs[next], .reserved_memory_type, RAM_BASE, reserved_end, attr);
-        next += 1;
-    }
-    // The linked ACPI tables: reclaimable once the OS has parsed them.
-    const acpi_end = acpi_qemu.POOL_BASE + acpi_qemu.POOL_SIZE;
-    if (have_acpi and acpi_in_window) {
-        emit(&descs[next], .acpi_reclaim_memory, acpi_qemu.POOL_BASE, acpi_end, attr);
-        next += 1;
-    }
-    // The loaded image and low boot allocations, up to the ACPI pool if present.
-    const bsd_end = if (have_acpi and !acpi_in_window) acpi_qemu.POOL_BASE else page_pool_base;
-    emit(&descs[next], .boot_services_data, FW_RESERVED_END, bsd_end, attr);
-    next += 1;
-    if (have_acpi and !acpi_in_window) {
-        emit(&descs[next], .acpi_reclaim_memory, acpi_qemu.POOL_BASE, acpi_end, attr);
-        next += 1;
-    }
-    // Free conventional memory for the OS, with the initrd carved out if present.
-    if (ir) |reg| {
-        emit(&descs[next], .conventional_memory, page_pool_base, reg.start, attr);
-        next += 1;
-        emit(&descs[next], .boot_services_data, reg.start, reg.end, attr);
-        next += 1;
-        emit(&descs[next], .conventional_memory, reg.end, RAM_END, attr);
-        next += 1;
-    } else {
-        emit(&descs[next], .conventional_memory, page_pool_base, RAM_END, attr);
-        next += 1;
-    }
+    var w: MapWriter = .{ .out = @ptrCast(@alignCast(mmap.?)) };
+    writeMap(&w);
+    std.debug.assert(w.count == counter.count);
     mmap_size.* = needed;
-    map_key.* = map_key_seq;
-    map_key_seq += 1;
+    map_key.* = pages.generation;
     return ok;
 }
 
@@ -762,7 +775,8 @@ fn setWatchdogTimer(
 fn exitBootServices(image: uefi.Handle, map_key: usize) callconv(.c) usize {
     tr("exitBootServices");
     _ = image;
-    _ = map_key;
+    // A key from an earlier map: the caller gets the map again and retries.
+    if (map_key != pages.generation) return @backingInt(Status.invalid_parameter);
     // The application takes over the machine. Only the variable services stay.
     // A second call does the same work again, so a retry is safe.
     rt.seal();
@@ -848,7 +862,9 @@ fn loadImage( // zippy:ignore too_many_params UEFI LoadImage ABI is fixed
     // The image bytes: an explicit buffer, or the file the device path names.
     // A file goes to a scratch block that is freed once the image is loaded.
     var scratch: ?Region = null;
-    defer if (scratch) |s| pages.free(s.start, s.end - s.start);
+    defer if (scratch) |s| {
+        _ = pages.free(s.start, s.end - s.start, .firmware);
+    };
     const src: []const u8 = if (source_buffer) |sb| blk: {
         if (source_size == 0) return @backingInt(Status.invalid_parameter);
         break :blk sb[0..source_size];
@@ -858,7 +874,7 @@ fn loadImage( // zippy:ignore too_many_params UEFI LoadImage ABI is fixed
         const path = devicePathFile(@ptrCast(dp), &name_buf) orelse return not_found;
         const fsize = fat.fileSize(path) orelse return not_found;
         const ssize = wholePages(fsize) orelse return @backingInt(Status.out_of_resources);
-        const sbase = pages.alloc(ssize, 4096, pages.end) orelse return @backingInt(Status.out_of_resources);
+        const sbase = pages.alloc(ssize, 4096, pages.end, boot_data_tag) orelse return @backingInt(Status.out_of_resources);
         scratch = .{ .start = sbase, .end = sbase + ssize };
         const sbuf = @as([*]u8, @ptrFromInt(sbase))[0..fsize];
         // A multi-MiB image over polled SPI takes many seconds. Announce the read
@@ -873,9 +889,11 @@ fn loadImage( // zippy:ignore too_many_params UEFI LoadImage ABI is fixed
     // block of its size. The block stays allocated until UnloadImage.
     const image_size = pe.sizeOf(src) catch return @backingInt(Status.load_error);
     const block_size = wholePages(image_size) orelse return @backingInt(Status.out_of_resources);
-    const base = pages.alloc(block_size, pageAlignment(block_size), pages.end) orelse return @backingInt(Status.out_of_resources);
+    const base = pages.alloc(block_size, pageAlignment(block_size), pages.end, image_tag) orelse return @backingInt(Status.out_of_resources);
     var keep_image = false;
-    defer if (!keep_image) pages.free(base, block_size);
+    defer if (!keep_image) {
+        _ = pages.free(base, block_size, .firmware);
+    };
     const loaded = pe.loadAt(src, base, image_size) catch return @backingInt(Status.load_error);
 
     const slot = loadedImageSlot() orelse return @backingInt(Status.out_of_resources);
@@ -885,6 +903,7 @@ fn loadImage( // zippy:ignore too_many_params UEFI LoadImage ABI is fixed
     slot.handle = h;
     slot.entry = loaded.entry;
     slot.block = .{ .start = base, .end = base + block_size };
+    slot.started = false;
     // The app reads its own LoadedImage (and sets load_options for the command
     // line) before StartImage, so publish one on the new handle.
     slot.li = .{
@@ -922,17 +941,18 @@ fn startImage(image: uefi.Handle, exit_data_size: ?*usize, exit_data: ?*[*]u16) 
     const slot = findLoadedImage(h) orelse return @backingInt(Status.invalid_parameter);
     const EntryFn = *const fn (uefi.Handle, *tables.SystemTable) callconv(.c) Status;
     const entry: EntryFn = @ptrFromInt(slot.entry);
+    slot.started = true;
     return @backingInt(entry(image, &system_table));
 }
 
-/// UnloadImage: drop a loaded image the app chose not to start. This frees the
-/// registry slot, the handle and the image block.
+/// UnloadImage: drop a loaded image. This frees the registry slot and the
+/// handle, and the image block when the image was never started.
 fn unloadImage(image: uefi.Handle) callconv(.c) usize {
     const h: *handledb.Handle = @ptrCast(@alignCast(image));
     if (findLoadedImage(h)) |slot| {
         slot.used = false;
         if (slot.handle) |hh| hh.used = false;
-        pages.free(slot.block.start, slot.block.end - slot.block.start);
+        if (!slot.started) _ = pages.free(slot.block.start, slot.block.end - slot.block.start, .firmware);
     }
     return ok;
 }
@@ -1216,18 +1236,20 @@ pub fn prepare(dtb: usize, hartid: usize, image_base: usize, image_size: usize) 
     // Size the memory map to real RAM from the comptime SoC tree (soc.zig),
     // clamped above our page pool so a large kernel + initrd has room.
     page_pool_base = poolBase(image_base + image_size);
+    first_image = .{ .start = image_base & ~@as(usize, 4095), .end = std.mem.alignForward(usize, image_base + image_size, 4096) };
     const ram_top = soc.ram_base + soc.ram_size;
     if (ram_top > page_pool_base + 0x100000) RAM_END = ram_top;
 
     // The boot sources install the initrd before they call prepare(), and the
     // first allocation comes later through a boot service. Take the page
-    // rounded initrd out of the pool so nothing is allocated over it.
+    // rounded initrd out of the pool so nothing is allocated over it. It is
+    // boot services data: the OS can reclaim it once the stub has copied it.
     pages = .init(page_pool_base, RAM_END);
     pool = .init(&pages);
     if (initrd.region()) |r| {
         const s = r.base & ~@as(usize, 4095);
         const e = std.mem.alignForward(usize, r.base + r.len, 4096);
-        if (poolPart(s, e)) |p| _ = pages.allocAt(p.start, p.end - p.start);
+        if (poolPart(s, e)) |p| _ = pages.allocAt(p.start, p.end - p.start, boot_data_tag);
     }
 
     // Simple Text Output: real output, the rest succeed as no-ops.

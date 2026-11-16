@@ -18,9 +18,15 @@ address.
 Weir implements the memory, protocol, and hand-off calls a loader needs:
 
 - `AllocatePages`, `AllocatePool`, and their frees, from one page pool. The
-  pool frees and reuses memory, and a page allocation of 2 MiB or more is 2 MiB
-  aligned.
-- `GetMemoryMap` and `ExitBootServices`.
+  pool frees and reuses memory, a page allocation of 2 MiB or more is 2 MiB
+  aligned, and a request for conventional, persistent, unaccepted or an
+  undefined memory type returns `EFI_INVALID_PARAMETER`.
+- `GetMemoryMap` and `ExitBootServices`. The memory map gives each allocated
+  range with its memory type, and free pool memory as conventional memory. A
+  pool block under 32 KiB of loader data or boot services memory can show as
+  loader data, and a reserved, unusable, MMIO or vendor type shows as reserved.
+  `ExitBootServices` returns `EFI_INVALID_PARAMETER` when the map key is not
+  the key of the current map.
 - `InstallProtocolInterface`, `HandleProtocol`, `OpenProtocol`, `LocateProtocol`,
   and `LocateDevicePath`.
 - `InstallConfigurationTable`, `CopyMem`, and `SetMem`.
