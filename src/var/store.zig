@@ -103,6 +103,7 @@ var flash: Flash = undefined;
 // Set up in place by `init`, because it is too large for the stack.
 var store: Store = undefined;
 var ready = false;
+var sealed = false;
 
 pub fn init() void {
     if (backend == .none) {
@@ -180,6 +181,15 @@ pub fn available() bool {
     return ready;
 }
 
+/// Applies the rules for the time after ExitBootServices. Nothing clears it.
+pub fn seal() void {
+    @atomicStore(bool, &sealed, true, .release);
+}
+
+fn isSealed() bool {
+    return @atomicLoad(bool, &sealed, .acquire);
+}
+
 /// Copy a variable's data out. On buffer_too_small, sets `data_size` to the required size.
 pub fn get(
     name: [*:0]const u16,
@@ -191,6 +201,7 @@ pub fn get(
     if (backend == .none or !ready) return .not_found;
     const units = efi.nameUnits(name, log.max_name_units) orelse return .not_found;
     const entry = store.get(name[0..units], guid) orelse return .not_found;
+    if (!efi.visible(isSealed(), entry.attributes)) return .not_found;
     if (attributes) |a| a.* = entry.attributes;
     if (data == null or data_size.* < entry.data.len) {
         data_size.* = entry.data.len;
@@ -215,6 +226,10 @@ pub fn set(
     const units = efi.nameUnits(name, log.max_name_units) orelse return .out_of_resources;
     if (units == 1) return .invalid;
     const key = name[0..units];
+    if (isSealed()) {
+        const existing = if (store.get(key, guid)) |e| e.attributes else null;
+        if (efi.sealedSet(kind, attributes, existing)) |result| return result;
+    }
     if (kind == .remove) {
         const existed = store.remove(key, guid) catch |err| return efi.fromSetError(err);
         return if (existed) .success else .not_found;
@@ -234,9 +249,17 @@ pub fn next(name_size: *usize, name: [*:0]u16, guid: *[16]u8) Result {
     const units = efi.nextNameUnits(name, name_size.*) orelse return .invalid;
     if (units > 1) {
         prev = .{ .name = name[0..units], .guid = guid };
-        if (store.get(prev.?.name, guid) == null) return .invalid;
+        const old = store.get(prev.?.name, guid);
+        if (!efi.nextPrevValid(isSealed(), if (old) |e| e.attributes else null)) return .invalid;
     }
-    const key = store.next(prev) orelse return .not_found;
+    var found = store.next(prev);
+    if (isSealed()) {
+        while (found) |k| : (found = store.next(k)) {
+            const entry = store.get(k.name, k.guid) orelse continue;
+            if (efi.visible(true, entry.attributes)) break;
+        }
+    }
+    const key = found orelse return .not_found;
     const bytes = key.name.len * 2;
     if (name_size.* < bytes) {
         name_size.* = bytes;

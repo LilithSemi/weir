@@ -223,6 +223,7 @@ pub fn build(b: *std.Build) void {
         "src/smbios/table.zig",
         "src/var/efi.zig",
         "src/var/log.zig",
+        "src/var/rt_abi.zig",
     };
     for (pure_tests) |path| {
         const t = b.addTest(.{

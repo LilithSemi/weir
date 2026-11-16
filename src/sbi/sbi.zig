@@ -10,6 +10,8 @@ const cpu = @import("../arch/riscv/cpu.zig");
 const clint = @import("../arch/riscv/clint.zig");
 const hsm = @import("hsm.zig");
 const ipi_mailbox = @import("ipi.zig");
+const vars = @import("vars.zig");
+const rt_abi = @import("../var/rt_abi.zig");
 const platform = @import("../platform.zig");
 
 /// SiFive-style test finisher. A write of this magic value powers the machine
@@ -38,8 +40,11 @@ const MIP_STIP: usize = 1 << 5; // supervisor timer pending
 
 // SBI return codes (sbiret.error).
 const SBI_SUCCESS: usize = 0;
-const SBI_ERR_NOT_SUPPORTED: usize = errCode(-2);
+pub const SBI_ERR_NOT_SUPPORTED: usize = errCode(-2);
 const SBI_ERR_INVALID_PARAM: usize = errCode(-3);
+// The variable call is in use on another hart: busy, try again.
+pub const SBI_ERR_DENIED: usize = errCode(-4);
+pub const SBI_ERR_INVALID_ADDRESS: usize = errCode(-5);
 
 fn errCode(comptime v: isize) usize {
     return @bitCast(@as(isize, v));
@@ -65,6 +70,7 @@ pub fn dispatch(eid: usize, fid: usize, args: [6]usize) Ret {
         EID_RFENCE => rfence(fid, args),
         EID_HSM => hartStateMgmt(fid, args),
         EID_DBCN => dbcn(fid, args),
+        rt_abi.eid => variables(fid, args),
         else => .{ .err = SBI_ERR_NOT_SUPPORTED },
     };
 }
@@ -192,7 +198,16 @@ fn probe(eid: usize) usize {
         EID_DBCN,
         EID_SRST,
         => 1,
+        rt_abi.eid => @intFromBool(vars.supported()),
         else => 0,
+    };
+}
+
+/// Firmware specific variable call. a0 holds the address of the request block.
+fn variables(fid: usize, args: [6]usize) Ret {
+    return switch (fid) {
+        rt_abi.fid_call => vars.call(args[0]),
+        else => .{ .err = SBI_ERR_NOT_SUPPORTED },
     };
 }
 

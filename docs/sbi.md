@@ -18,6 +18,7 @@ Weir reports SBI specification version 2.0. Its implementation ID is `MWRI`
 | HSM | `0x48534D` | `hart_start`, `hart_stop`, `hart_get_status` |
 | Debug console (DBCN) | `0x4442434E` | `console_write`, `console_read`, `console_write_byte` |
 | System reset (SRST) | `0x53525354` | `system_reset` |
+| Variables | `0x0A575249` | `call` |
 | Legacy | `0x01`, `0x02`, `0x08` | `console_putchar`, `console_getchar`, `shutdown` |
 
 The Base extension reads `mvendorid`, `marchid`, and `mimpid` from the machine

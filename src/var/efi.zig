@@ -2,8 +2,14 @@
 
 const std = @import("std");
 const log = @import("log.zig");
+const rt_abi = @import("rt_abi.zig");
 
-pub const Result = enum { success, not_found, buffer_too_small, invalid, out_of_resources, device_error };
+pub const Result = rt_abi.Result;
+
+comptime {
+    if (log.max_name_units != rt_abi.max_name_units or log.max_data_len != rt_abi.max_data_len)
+        @compileError("the request block must carry the largest name and data of the log");
+}
 
 /// The Weir vendor GUID, 53ad00ad-b655-414a-a2ff-058c0db1659d, in EFI byte order.
 pub const weir_guid: [16]u8 = .{ 0xad, 0x00, 0xad, 0x53, 0x55, 0xb6, 0x4a, 0x41, 0xa2, 0xff, 0x05, 0x8c, 0x0d, 0xb1, 0x65, 0x9d };
@@ -47,6 +53,29 @@ pub const SetKind = enum { remove, write, invalid };
 pub fn setKind(attributes: u32, data_size: usize) SetKind {
     if (data_size == 0 or attributes == 0) return .remove;
     return if (attributesValid(attributes)) .write else .invalid;
+}
+
+/// After ExitBootServices a variable is visible only when it has runtime access.
+pub fn visible(sealed: bool, attributes: u32) bool {
+    return !sealed or attributes & runtime_access != 0;
+}
+
+/// The previous name of GetNextVariableName must exist, and a sealed store hides it without runtime access.
+pub fn nextPrevValid(sealed: bool, existing: ?u32) bool {
+    const attributes = existing orelse return false;
+    return visible(sealed, attributes);
+}
+
+/// The result that a sealed store gives for a `set`, or null when the `set` may go on.
+/// `existing` holds the attributes of the variable that the name and GUID find.
+pub fn sealedSet(kind: SetKind, attributes: u32, existing: ?u32) ?Result {
+    if (kind == .invalid) return .invalid;
+    if (existing) |old| {
+        if (old & runtime_access == 0) return .invalid;
+    }
+    const needed = runtime_access | non_volatile;
+    if (kind == .write and attributes & needed != needed) return .invalid;
+    return null;
 }
 
 /// The partitions of a `FlashLock` request that may be locked. The variable
@@ -168,6 +197,43 @@ test "lockMask clears the bits at and above the partition count" {
 test "lockMask keeps bit 31 when there are 32 partitions" {
     try testing.expectEqual(@as(u32, 0xffff_fffe), lockMask(0xffff_ffff, 0, 32));
     try testing.expectEqual(@as(u32, 0x7fff_ffff), lockMask(0xffff_ffff, 31, 32));
+}
+
+test "a sealed store hides variables without runtime access" {
+    try testing.expect(visible(false, 0x3));
+    try testing.expect(!visible(true, 0x3));
+    try testing.expect(visible(true, 0x6));
+    try testing.expect(visible(true, 0x7));
+}
+
+test "a sealed write needs runtime access and the non-volatile attribute" {
+    try testing.expectEqual(@as(?Result, null), sealedSet(.write, 0x7, null));
+    try testing.expectEqual(@as(?Result, .invalid), sealedSet(.write, 0x3, null));
+    try testing.expectEqual(@as(?Result, .invalid), sealedSet(.write, 0x6, null));
+    try testing.expectEqual(@as(?Result, .invalid), sealedSet(.invalid, 0x7, null));
+}
+
+test "a sealed set of a variable without runtime access is invalid" {
+    try testing.expectEqual(@as(?Result, .invalid), sealedSet(.write, 0x7, 0x3));
+    try testing.expectEqual(@as(?Result, .invalid), sealedSet(.remove, 0, 0x3));
+    try testing.expectEqual(@as(?Result, null), sealedSet(.write, 0x7, 0x7));
+    try testing.expectEqual(@as(?Result, null), sealedSet(.write, 0x7, 0x6));
+}
+
+test "a sealed remove of a missing or visible variable goes on" {
+    try testing.expectEqual(@as(?Result, null), sealedSet(.remove, 0, null));
+    try testing.expectEqual(@as(?Result, null), sealedSet(.remove, 0, 0x7));
+}
+
+test "a sealed remove of a volatile variable with runtime access goes on" {
+    try testing.expectEqual(@as(?Result, null), sealedSet(.remove, 0, 0x6));
+}
+
+test "a previous name that is missing or hidden is invalid" {
+    try testing.expect(!nextPrevValid(false, null));
+    try testing.expect(nextPrevValid(false, 0x3));
+    try testing.expect(!nextPrevValid(true, 0x3));
+    try testing.expect(nextPrevValid(true, 0x6));
 }
 
 test "set errors map to EFI results" {

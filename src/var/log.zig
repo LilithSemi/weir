@@ -83,6 +83,10 @@ fn checkLayout(comptime T: type, comptime size: usize) void {
 comptime {
     checkLayout(BankHeader, 16);
     checkLayout(RecordHeader, 32);
+    // A name is read in place as u16 units. Records start at multiples of record_align from the start of a 4 byte aligned buffer.
+    std.debug.assert(record_align % @alignOf(u16) == 0);
+    std.debug.assert(bank_header_len % record_align == 0);
+    std.debug.assert(record_header_len % record_align == 0);
 }
 
 pub fn bankCrc(sequence: u32) u32 {
@@ -203,6 +207,7 @@ fn view(bank: []align(4) const u8, off: usize) Record {
         .len = recordLen(header.name_len, header.data_len),
         .attributes = header.attributes,
         .guid = raw[8..][0..16],
+        // The offset is a multiple of 4 and the header is 32 bytes, so the name is 2 byte aligned.
         .name = @alignCast(std.mem.bytesAsSlice(u16, name_bytes)),
         .data = bank[off + record_header_len + header.name_len ..][0..header.data_len],
     };
@@ -293,6 +298,7 @@ pub fn Store(comptime Flash: type, comptime geo: Geometry) type {
         }
         // A compaction erases whole units, so a unit must not hold bytes of both banks.
         if (geo.erase_size == 0) @compileError("erase_size must not be 0");
+        if (geo.erase_size % record_align != 0) @compileError("erase_size must be a multiple of 4");
         if (a % geo.erase_size != 0 or b % geo.erase_size != 0) {
             @compileError("the bank offsets must be aligned to erase_size");
         }
@@ -317,6 +323,13 @@ pub fn Store(comptime Flash: type, comptime geo: Geometry) type {
         end: usize,
         /// The log has a torn or bad tail that a compaction must remove.
         needs_compaction: bool,
+
+        comptime {
+            std.debug.assert(@alignOf(Self) >= record_align);
+            std.debug.assert(@offsetOf(Self, "mirror") % record_align == 0);
+            std.debug.assert(@offsetOf(Self, "scratch") % record_align == 0);
+            std.debug.assert(@offsetOf(Self, "ram") % record_align == 0);
+        }
 
         /// Sets up the store in place. A store in a global uses this, because the value is too large for a stack.
         pub fn setup(self: *Self, flash: *Flash) void {
