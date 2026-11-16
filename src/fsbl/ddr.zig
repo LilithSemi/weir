@@ -21,12 +21,22 @@ const std = @import("std");
 const cfg = @import("config.zig");
 const ddr_train = @import("ddr_train.zig");
 
-/// The top-of-array probe addresses, as a pure function of the usable DRAM
-/// range. `size` must already exclude any knob window (the device tree's
-/// size does, on a `train=runtime` build), so `top` never lands inside it.
-fn memtestBounds(base: usize, size: usize) struct { top: usize, near_top: usize } {
+/// The middle and top-of-array probe addresses, as a pure function of the
+/// usable DRAM range. `size` must already exclude any knob window (the device
+/// tree size does, on a `train=runtime` build), so `top` never lands inside it.
+fn memtestBounds(base: usize, size: usize) struct { mid: usize, top: usize, near_top: usize } {
     const top = base + size;
-    return .{ .top = top, .near_top = top - 0x100 };
+    return .{ .mid = base + ((size / 2) & ~@as(usize, 7)), .top = top, .near_top = top - 0x100 };
+}
+
+test "memtest probes stay inside a 32 MiB array" {
+    const base: usize = 0x80000000;
+    const size: usize = 32 * 1024 * 1024;
+    const bounds = memtestBounds(base, size);
+    for ([_]usize{ bounds.mid, bounds.near_top, bounds.top - 8 }) |a| {
+        try std.testing.expect(a >= base and a + 8 <= base + size);
+        try std.testing.expect(a % 8 == 0);
+    }
 }
 
 test "memtest bounds stay clear of a 128 MB OrangeCrab knob window" {
@@ -63,7 +73,7 @@ pub fn memtest(con: *std.Io.Writer) bool {
     // (2) 64-bit read-after-write at LOW + HIGH addresses (near the top of
     // the usable array, the stack region)
     var e2: u32 = 0;
-    const addrs = [_]usize{ b, b + 0x1000, b + 0x04000000, near_top, top - 8 };
+    const addrs = [_]usize{ b, b + 0x1000, bounds.mid, near_top, top - 8 };
     for (addrs) |a| {
         const v: u64 = 0xDEADBEEF_00000000 | @as(u64, @intCast(a & 0xFFFFFFFF));
         @as(*volatile u64, @ptrFromInt(a)).* = v;
