@@ -25,12 +25,16 @@ Weir implements the memory, protocol, and hand-off calls a loader needs:
 
 ## Runtime Services
 
-- `ResetSystem` and `SetVirtualAddressMap`.
+- `ResetSystem`.
 - `GetVariable`, `SetVariable`, `GetNextVariableName`, and `QueryVariableInfo`.
   A flash store keeps the variables with the non-volatile attribute. See
   [Variable store](#variable-store).
 - `GetTime` and `SetTime`. Time comes from an RTC when the board has one, else
   from a software clock that starts at the UNIX epoch (`src/time.zig`).
+
+After `ExitBootServices`, the four variable services keep working when the board
+has a variable store. See [Runtime access](#runtime-access). Every other runtime
+service returns `EFI_UNSUPPORTED`.
 
 ## Variable store
 
@@ -42,7 +46,7 @@ time from the device tree:
 - CFI: the tree has a `cfi-flash` node with a second bank, as on QEMU `virt`. The
   store lives in that bank.
 - None: the board has neither. A read gives `EFI_NOT_FOUND` and a write gives
-  `EFI_DEVICE_ERROR`.
+  `EFI_UNSUPPORTED`.
 
 The store uses two banks on the flash. Each bank holds a header and an append
 log of records, and every record has a CRC. A write appends a record, and a
@@ -64,8 +68,52 @@ leaves the old bank active, and Weir prints nothing.
 A variable without `EFI_VARIABLE_NON_VOLATILE` stays in RAM and is gone at
 reset. A set with attributes of 0 or a data size of 0 deletes the variable.
 
-The variable services work before `ExitBootServices`. Runtime access to
-variables is not available yet.
+### Runtime access
+
+The code of the four variable services is in the runtime region, so an OS can
+call it after `ExitBootServices`. The region has two memory map entries, both
+with the `EFI_MEMORY_RUNTIME` attribute:
+
+- `EfiRuntimeServicesCode` holds the stubs.
+- `EfiRuntimeServicesData` holds the Runtime Services table and the request
+  block.
+
+The stubs use nothing else of the firmware, and the build checks this. See
+[building.md](building.md).
+
+A stub copies its arguments into the request block and makes one SBI call.
+M-mode owns the variable store and the flash, and runs the request. See
+[sbi.md](sbi.md#variables).
+
+`EFI_RT_PROPERTIES_TABLE` has the value `0x2070` when the board has a store and
+the runtime region is in place.
+This value lists the four variable services. With no store, the value is 0 and the
+services return `EFI_NOT_FOUND` for a read and `EFI_UNSUPPORTED` for a write or
+`QueryVariableInfo`. Weir does not support `SetVirtualAddressMap`. It expects the
+OS to map each memory map entry that has the runtime attribute at its physical
+address.
+
+After `ExitBootServices`, these rules apply:
+
+| Request | Result |
+| --- | --- |
+| Read a variable that has no runtime access | `EFI_NOT_FOUND`. The variable is hidden, and `GetNextVariableName` skips it |
+| Write without both the non-volatile and the runtime access attribute | `EFI_INVALID_PARAMETER` |
+| Write or delete of a variable that has no runtime access | `EFI_INVALID_PARAMETER` |
+| Delete of a visible variable | `EFI_SUCCESS` |
+| Delete of a variable that does not exist | `EFI_NOT_FOUND` |
+| `GetNextVariableName` with a previous name that is hidden or does not exist | `EFI_INVALID_PARAMETER` |
+
+A write of a volatile variable fails after `ExitBootServices`.
+
+The callers must serialise their runtime calls, because the request block is
+shared. M-mode cannot protect the block. A second caller that arrives while a
+request runs gets `EFI_DEVICE_ERROR`.
+
+A write can take a long time when the store compacts, because Weir erases many
+sectors. The hart that makes the call stays in M-mode for that time. While it is in a
+long flash operation, another hart that sends it an SBI remote fence or an IPI
+waits until it returns.
 
 ### FlashLock
 

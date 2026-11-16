@@ -46,6 +46,45 @@ software-interrupt mailbox (`src/sbi/ipi.zig`). A hart fences itself directly
 and never sends itself an IPI. HSM parks secondary harts in M-mode until a
 `hart_start` wakes one at the entry point the caller gave.
 
+## Variables
+
+The variables extension (EID `0x0A575249`) has one function, `call` (FID 0). It
+runs an EFI variable request on the variable store in M-mode. The UEFI runtime
+stubs make this call. See [uefi.md](uefi.md#runtime-access).
+
+The one argument is the address of the request block. M-mode accepts only the
+address of Weir's own request block, which lies in the EFI runtime data region.
+The call returns one of these SBI values:
+
+| Value | Meaning |
+| --- | --- |
+| Success | M-mode ran the request. The `status` field holds the result |
+| `SBI_ERR_INVALID_ADDRESS` | The address is not the request block |
+| `SBI_ERR_NOT_SUPPORTED` | The board has no variable store |
+| `SBI_ERR_DENIED` | Another call is running |
+
+`probe_extension` reports the extension only when the board has a store.
+
+The request block is the `Request` struct in `src/var/rt_abi.zig`. S-mode and
+M-mode share this layout.
+
+| Offset | Field | Meaning |
+| --- | --- | --- |
+| 0 | `op` | 1 get, 2 set, 3 next, 4 query, 5 seal |
+| 4 | `status` | The result. 0 success, 1 not found, 2 buffer too small, 3 invalid, 4 out of resources, 5 device error |
+| 8 | `attributes` | The variable attributes |
+| 16 | `data_size` | The size of `data` in bytes |
+| 24 | `name_size` | The size of `name` in bytes, with the terminator |
+| 32 | `max_storage` | The query result: the total storage |
+| 40 | `remaining` | The query result: the free storage |
+| 48 | `max_var` | The query result: the largest variable |
+| 56 | `guid` | The vendor GUID, 16 bytes |
+| 72 | `name` | The name, 256 UTF-16 units at most |
+| 584 | `data` | The variable data, 32 KiB at most |
+
+The `seal` operation applies the store rules for the time after
+`ExitBootServices`. `ExitBootServices` makes this request.
+
 ## Not yet implemented
 
 Weir does not yet provide PMU, SUSP, STA, CPPC, or the SBI v3 extensions (SSE,

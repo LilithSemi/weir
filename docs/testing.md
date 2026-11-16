@@ -79,6 +79,66 @@ first write overwrites it.
 The SPI backend needs hardware, because QEMU does not model the Harbor flash
 write port.
 
+### Runtime variable access on QEMU
+
+The runtime self-test calls the variable services after `ExitBootServices`, the
+way an OS does. It runs as an EFI application in S-mode and uses page tables that
+map only the runtime region and the test. Build it with the same device tree as
+above:
+
+```
+zig build -Ddtb=riscv-virt.dtb -Drt-selftest=true
+```
+
+Boot with the same pflash file as for the variable store test. The test shuts the
+machine down at the end, and QEMU exits with status 0. A first boot prints these
+lines:
+
+```
+[var] cfi flash store @ 22000000, 0 variable(s)
+[rt] self-test: starting in S-mode
+[rt] self-test: map 800b8000-800b9000 rx
+[rt] self-test: map 800b9000-800c2000 rw
+[rt] self-test: map 800c2000-800c6000 rx
+[rt] self-test: map 800c6000-800cb000 rw
+[rt] self-test: pass, boot 1
+```
+
+The addresses of the `map` lines depend on the build. The test keeps its boot
+count in a non-volatile variable that it writes after `ExitBootServices`. It also
+writes a variable with no runtime access. Both stay in the store, so the second
+boot with the same file prints:
+
+```
+[var] cfi flash store @ 22000000, 2 variable(s)
+[rt] self-test: pass, boot 2
+```
+
+A line `[rt] self-test: fail at` with a step name and a status means a variable call
+gave a wrong result. A line `[rt] self-test: fault` with the trap values and a
+step name means the runtime code used memory outside the region. A build with no
+device tree prints `[rt] self-test: no variable store` and boots as usual.
+
+### Variables from Linux
+
+A Linux kernel with `CONFIG_EFI` and `CONFIG_EFIVAR_FS` finds the runtime
+services through the EFI system table. Weir expects the kernel to map the two
+runtime region entries at their physical addresses and to call the variable
+services from there. To check this, mount `efivarfs` and list the variables:
+
+```
+mount -t efivarfs efivarfs /sys/firmware/efi/efivars
+ls /sys/firmware/efi/efivars
+efibootmgr
+```
+
+Weir expects the list to show the variables that have runtime access. A variable
+that the boot loader sets without runtime access must not appear. Weir expects
+`efibootmgr` to read and write the `Boot####` and `BootOrder` variables. Nobody
+has run these two commands against Weir yet. Weir keeps a variable with the
+non-volatile attribute across a reset, so the next boot shows it again. See
+[uefi.md](uefi.md#runtime-access) for the rules.
+
 ## Hardware
 
 The reference hardware is a River Creek V1 or Delta V1 SoC on a Digilent Arty
