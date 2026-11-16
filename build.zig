@@ -109,6 +109,7 @@ pub fn build(b: *std.Build) void {
     const boot_manager = b.option(bool, "boot-manager", "Boot via the ESP boot manager (GPT + FAT + BootOrder)") orelse disk_boot;
 
     const var_selftest = b.option(bool, "var-selftest", "Test the EFI variable store at each boot") orelse false;
+    const rt_selftest = b.option(bool, "rt-selftest", "Run the runtime variable self-test: it writes and keeps two variables in the store and ends the boot when a store exists") orelse false;
 
     // An initramfs to hand the Linux kernel via the LoadFile2 protocol, so it
     // reaches a real userspace instead of panicking for lack of a root fs.
@@ -131,6 +132,7 @@ pub fn build(b: *std.Build) void {
     options.addOption(bool, "has_board_info", board_info_path != null);
     options.addOption([]const u8, "bios_date", bios_date);
     options.addOption(bool, "var_selftest", var_selftest);
+    options.addOption(bool, "rt_selftest", rt_selftest);
 
     const mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -182,7 +184,7 @@ pub fn build(b: *std.Build) void {
         .root_module = mod,
     });
     exe.entry = .{ .symbol_name = "_start" };
-    exe.setLinkerScript(genLd(b, ld_gen, dtb_path, "main", null));
+    exe.setLinkerScript(genLd(b, ld_gen, dtb_path, if (rt_selftest) "main-rt-selftest" else "main", null));
 
     // The linked ELF (for debugging and inspection).
     const install_elf = b.addInstallBinFile(exe.getEmittedBin(), "weir-firmware.elf");

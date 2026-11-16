@@ -3,8 +3,9 @@
 //! the same description the firmware boots with. This way build.zig does not
 //! hand-roll a flattened-tree parser.
 //!
-//! Usage: fdt-ld <dtb-path> <kind:main|fsbl> <out-path> [region-hex]
+//! Usage: fdt-ld <dtb-path> <kind:main|main-rt-selftest|fsbl> <out-path> [region-hex]
 //!   main : firmware image linked at the DRAM /memory base.
+//!   main-rt-selftest : main, with the sections of the runtime self-test.
 //!   fsbl : XIP first-stage. It puts .text/.rodata in the SPI-NOR flash window.
 //!          It puts .data/.bss/stack in the DRAM window (region-hex bytes). The
 //!          .data load image stays in flash. creek has no SRAM, so DRAM is the
@@ -62,7 +63,10 @@ pub fn main(init: std.process.Init) !void {
         break :blk try std.fmt.allocPrint(gpa, fsbl_template, .{
             bases.flash_base + bases.fsbl_off, origin, len, bases.fw_off, bases.fw_max,
         });
-    } else try std.fmt.allocPrint(gpa, main_template, .{bases.ram_base});
+    } else blk: {
+        const selftest = std.mem.eql(u8, kind, "main-rt-selftest");
+        break :blk try std.fmt.allocPrint(gpa, main_template, .{ bases.ram_base, if (selftest) selftest_sections else "" });
+    };
 
     const out = if (std.fs.path.isAbsolute(out_path))
         try std.Io.Dir.createFileAbsolute(io, out_path, .{})
@@ -100,7 +104,7 @@ const main_template =
     \\        __rt_data_start = .; *(.rt_data .rt_data.*)
     \\        . = ALIGN(0x1000); __rt_data_end = .;
     \\    }}
-    \\    . = ALIGN(8);
+    \\{s}    . = ALIGN(8);
     \\    .bss (NOLOAD) : {{
     \\        __bss_start = .; *(.bss .bss.* .sbss .sbss.* COMMON)
     \\        . = ALIGN(8); __bss_end = .;
@@ -115,6 +119,20 @@ const main_template =
     \\        *(.comment) *(.note .note.*) *(.eh_frame .eh_frame_hdr) *(.riscv.attributes)
     \\    }}
     \\}}
+    \\
+;
+
+/// The runtime self-test, in whole pages of its own, so it can map itself alone.
+const selftest_sections =
+    \\    . = ALIGN(0x1000);
+    \\    .selftest_text : {
+    \\        __selftest_text_start = .; *(.selftest_text .selftest_text.*)
+    \\        . = ALIGN(0x1000); __selftest_text_end = .;
+    \\    }
+    \\    .selftest_data (NOLOAD) : {
+    \\        __selftest_data_start = .; *(.selftest_data .selftest_data.*)
+    \\        . = ALIGN(0x1000); __selftest_data_end = .;
+    \\    }
     \\
 ;
 

@@ -18,6 +18,8 @@ const time = @import("time.zig");
 const manager = @import("boot/manager.zig");
 const uefi = @import("uefi/uefi.zig");
 const initrd = @import("uefi/initrd.zig");
+const rt_selftest = @import("uefi/rt_selftest.zig");
+const build_options = @import("build_options");
 const cpu = @import("arch/riscv/cpu.zig");
 const clint = @import("arch/riscv/clint.zig");
 const soc = @import("soc");
@@ -508,6 +510,15 @@ pub fn handoff(hartid: usize, dtb: usize) Handoff {
     if (config.initrd) |img| {
         console.out.print("[initrd] serving {d} bytes via LoadFile2\n", .{img.len}) catch {};
         initrd.install(img);
+    }
+
+    if (build_options.rt_selftest) {
+        if (var_store.available()) {
+            const table = uefi.prepare(stableDtb(dtb_eff), hartid, rt_selftest.imageBase(), rt_selftest.imageSize());
+            console.out.writeAll("[rt] self-test: starting in S-mode\n") catch {};
+            return .{ .entry = @intFromPtr(&rt_selftest.start), .a0 = @intFromPtr(uefi.imageHandle()), .a1 = table };
+        }
+        console.out.writeAll("[rt] self-test: no variable store\n") catch {};
     }
 
     if (config.boot_manager) {
