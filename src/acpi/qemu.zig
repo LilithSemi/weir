@@ -17,7 +17,7 @@ const platform = @import("../platform.zig");
 // Marked EfiACPIReclaimMemory in the EFI map so the OS maps then reclaims the
 // tables. Sits below the page pool (see mem.zig), clear of the loaded PE.
 pub const POOL_BASE: usize = mem.acpi_pool_base;
-pub const POOL_SIZE: usize = mem.acpi_pool_size; // far more than the tables need
+pub const POOL_SIZE: usize = mem.acpi_pool_size;
 
 var pool_next: usize = POOL_BASE;
 var rsdp_addr: usize = 0;

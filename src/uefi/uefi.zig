@@ -39,12 +39,13 @@ fn finisher() *volatile u32 {
 }
 
 // Memory layout advertised to the app, derived from build-time ram_base (see
-// mem.zig). Firmware and loaded image sit low. Pages come from the high half.
+// mem.zig). Firmware and loaded image sit low. Pages come from the pool above.
 const RAM_BASE = mem.ram_base;
 // Usable RAM ceiling. The 256 MiB default is too small for a large netboot
 // initrd, so prepare() replaces it with real top-of-RAM from the DTB /memory.
 var RAM_END: usize = mem.ram_end_default;
-const PAGE_POOL_BASE = mem.page_pool_base;
+// prepare() sets it. See poolBase.
+var page_pool_base: usize = mem.page_pool_base orelse mem.load_base;
 
 // prepare() builds these EFI tables and protocol structs before the app can
 // read them, so an undefined start is safe. Zero-init would only add cost.
@@ -128,7 +129,7 @@ const RiscvBootProtocol = extern struct {
     get_boot_hartid: *const fn (*RiscvBootProtocol, *usize) callconv(.c) Status,
 };
 
-// One allocator over [PAGE_POOL_BASE, RAM_END), shared by AllocatePool and
+// One allocator over [page_pool_base, RAM_END), shared by AllocatePool and
 // AllocatePages. The Linux EFI stub asks for multi-MiB buffers (2 MiB FDT, the
 // relocated kernel), so it lives in conventional RAM, not a firmware array.
 // prepare() sets it up. Until then it holds no memory.
@@ -137,6 +138,13 @@ var pool: page_alloc.Pool = .init(&pages);
 var map_key_seq: usize = 1;
 
 const Region = struct { start: usize, end: usize };
+
+/// The page pool base for a first image that ends at `image_end`. The small
+/// layout has no fixed base. There the pool starts after the image, 2 MiB aligned.
+fn poolBase(image_end: usize) usize {
+    if (mem.page_pool_base) |base| return base;
+    return std.mem.alignForward(usize, @max(image_end, mem.load_base), 0x200000);
+}
 
 // The part of [start, end) that lies in the pool, or null.
 fn poolPart(start: usize, end: usize) ?Region {
@@ -620,7 +628,7 @@ fn getMemoryMap(
         if (initrd.region()) |r| {
             const s = r.base & ~@as(usize, 4095);
             const e = (r.base + r.len + 4095) & ~@as(usize, 4095);
-            if (s >= PAGE_POOL_BASE and e <= RAM_END and e > s) {
+            if (s >= page_pool_base and e <= RAM_END and e > s) {
                 break :blk .{ .start = s, .end = e };
             }
         }
@@ -632,6 +640,9 @@ fn getMemoryMap(
     // linked, plus the free region(s): one normally, three when the initrd
     // splits them.
     const region = runtimeRegion();
+    // In the small layout the ACPI pool is the top of the firmware window.
+    const acpi_in_window = mem.acpi_pool_base < FW_RESERVED_END;
+    const reserved_end = if (have_acpi and acpi_in_window) acpi_qemu.POOL_BASE else FW_RESERVED_END;
     const firmware_descs: usize = if (region != null) 4 else 1;
     const acpi_descs: usize = if (have_acpi) 1 else 0;
     const free_descs: usize = if (ir != null) 3 else 1;
@@ -676,37 +687,36 @@ fn getMemoryMap(
         next += 1;
         emit(&descs[next], .runtime_services_data, r.data_start, r.data_end, runtime);
         next += 1;
-        emit(&descs[next], .reserved_memory_type, r.data_end, FW_RESERVED_END, attr);
+        emit(&descs[next], .reserved_memory_type, r.data_end, reserved_end, attr);
         next += 1;
     } else {
-        emit(&descs[next], .reserved_memory_type, RAM_BASE, FW_RESERVED_END, attr);
+        emit(&descs[next], .reserved_memory_type, RAM_BASE, reserved_end, attr);
+        next += 1;
+    }
+    // The linked ACPI tables: reclaimable once the OS has parsed them.
+    const acpi_end = acpi_qemu.POOL_BASE + acpi_qemu.POOL_SIZE;
+    if (have_acpi and acpi_in_window) {
+        emit(&descs[next], .acpi_reclaim_memory, acpi_qemu.POOL_BASE, acpi_end, attr);
         next += 1;
     }
     // The loaded image and low boot allocations, up to the ACPI pool if present.
-    const bsd_end = if (have_acpi) acpi_qemu.POOL_BASE else PAGE_POOL_BASE;
+    const bsd_end = if (have_acpi and !acpi_in_window) acpi_qemu.POOL_BASE else page_pool_base;
     emit(&descs[next], .boot_services_data, FW_RESERVED_END, bsd_end, attr);
     next += 1;
-    if (have_acpi) {
-        // The linked ACPI tables: reclaimable once the OS has parsed them.
-        emit(
-            &descs[next],
-            .acpi_reclaim_memory,
-            acpi_qemu.POOL_BASE,
-            acpi_qemu.POOL_BASE + acpi_qemu.POOL_SIZE,
-            attr,
-        );
+    if (have_acpi and !acpi_in_window) {
+        emit(&descs[next], .acpi_reclaim_memory, acpi_qemu.POOL_BASE, acpi_end, attr);
         next += 1;
     }
     // Free conventional memory for the OS, with the initrd carved out if present.
     if (ir) |reg| {
-        emit(&descs[next], .conventional_memory, PAGE_POOL_BASE, reg.start, attr);
+        emit(&descs[next], .conventional_memory, page_pool_base, reg.start, attr);
         next += 1;
         emit(&descs[next], .boot_services_data, reg.start, reg.end, attr);
         next += 1;
         emit(&descs[next], .conventional_memory, reg.end, RAM_END, attr);
         next += 1;
     } else {
-        emit(&descs[next], .conventional_memory, PAGE_POOL_BASE, RAM_END, attr);
+        emit(&descs[next], .conventional_memory, page_pool_base, RAM_END, attr);
         next += 1;
     }
     mmap_size.* = needed;
@@ -1205,13 +1215,14 @@ pub fn prepare(dtb: usize, hartid: usize, image_base: usize, image_size: usize) 
 
     // Size the memory map to real RAM from the comptime SoC tree (soc.zig),
     // clamped above our page pool so a large kernel + initrd has room.
+    page_pool_base = poolBase(image_base + image_size);
     const ram_top = soc.ram_base + soc.ram_size;
-    if (ram_top > PAGE_POOL_BASE + 0x100000) RAM_END = ram_top;
+    if (ram_top > page_pool_base + 0x100000) RAM_END = ram_top;
 
     // The boot sources install the initrd before they call prepare(), and the
     // first allocation comes later through a boot service. Take the page
     // rounded initrd out of the pool so nothing is allocated over it.
-    pages = .init(PAGE_POOL_BASE, RAM_END);
+    pages = .init(page_pool_base, RAM_END);
     pool = .init(&pages);
     if (initrd.region()) |r| {
         const s = r.base & ~@as(usize, 4095);

@@ -88,6 +88,12 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "dtree", .module = dtree_host },
                 .{ .name = "fdt_bases", .module = fdt_bases_mod },
+                // The firmware's own memory layout, for the image size check.
+                .{ .name = "layout", .module = b.createModule(.{
+                    .root_source_file = b.path("src/layout.zig"),
+                    .target = b.graph.host,
+                    .optimize = .ReleaseFast,
+                }) },
             },
         }),
     });
@@ -235,6 +241,7 @@ pub fn build(b: *std.Build) void {
         "src/acpi/tables.zig",
         "src/flash/cfi.zig",
         "src/flash/spi_nor.zig",
+        "src/layout.zig",
         "src/smbios/structs.zig",
         "src/smbios/table.zig",
         "src/uefi/page_alloc.zig",

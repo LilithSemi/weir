@@ -15,6 +15,7 @@ const std = @import("std");
 const dtree = @import("dtree");
 const fdt_bases = @import("fdt_bases");
 const Bases = fdt_bases.Bases;
+const layout = @import("layout");
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -65,7 +66,11 @@ pub fn main(init: std.process.Init) !void {
         });
     } else blk: {
         const selftest = std.mem.eql(u8, kind, "main-rt-selftest");
-        break :blk try std.fmt.allocPrint(gpa, main_template, .{ bases.ram_base, if (selftest) selftest_sections else "" });
+        // The tool does not need the hart count: it does not change the limit.
+        const limit = layout.compute(bases.ram_size, 1).imageLimit();
+        break :blk try std.fmt.allocPrint(gpa, main_template, .{
+            bases.ram_base, if (selftest) selftest_sections else "", limit,
+        });
     };
 
     const out = if (std.fs.path.isAbsolute(out_path))
@@ -115,6 +120,7 @@ const main_template =
     \\    _stacks_bottom = .;
     \\    . = . + STACK_SIZE * MAX_HARTS;
     \\    _stacks_top = .;
+    \\    ASSERT(_stacks_top <= RAM_BASE + 0x{x}, "Weir does not fit in its firmware window. Build with -Doptimize=ReleaseFast or ReleaseSmall, or use a board with more RAM.")
     \\    /DISCARD/ : {{
     \\        *(.comment) *(.note .note.*) *(.eh_frame .eh_frame_hdr) *(.riscv.attributes)
     \\    }}

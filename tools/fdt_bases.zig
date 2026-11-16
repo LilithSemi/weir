@@ -21,7 +21,7 @@ pub const Bases = struct {
     /// large. 0 when the tree has no flash reg size, so callers fall back.
     flash_size: u64 = 0,
     ram_base: u64 = 0x80000000,
-    ram_size: u64 = 0x08000000, // 128 MiB. Only the fsbl layout uses this.
+    ram_size: u64 = 0x08000000, // 128 MiB. The fsbl layout and the main image limit use it.
     /// On-chip SRAM window (compatible "mmio-sram"), 0 when the tree has none.
     /// When it exists the FSBL puts its scratch (stack/.data/.bss) here, not at
     /// the top of DRAM. The FSBL then brings up and read-trains the DDR without

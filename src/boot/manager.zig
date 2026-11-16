@@ -22,12 +22,27 @@ const mem = @import("../mem.zig");
 const tpm = @import("../tpm/tpm.zig");
 
 // Kernel and initrd read into high RAM, not a small firmware buffer: a NixOS
-// kernel + initramfs are tens of MiB (use -m 2G on QEMU). Bases derive from
-// ram_base (see mem.zig).
-const KERNEL_READ_BASE: usize = mem.kernel_read_base;
-const KERNEL_READ_MAX: usize = 64 << 20;
-const INITRD_BASE: usize = mem.initrd_base;
-const INITRD_MAX: usize = 512 << 20;
+// kernel + initramfs are tens of MiB (use -m 2G on QEMU). The layout comes
+// from the RAM size (see mem.zig).
+
+/// The part of a staging buffer that lies inside RAM. Empty when none does.
+fn staging(base: usize, size: usize) []u8 {
+    const end = mem.ram_end_default;
+    const len = if (base < end) @min(size, end - base) else 0;
+    return @as([*]u8, @ptrFromInt(base))[0..len];
+}
+
+/// Log a file at `path` that does not fit in `capacity` bytes. Returns true
+/// when it logged.
+fn reportTooLarge(path: []const u8, capacity: usize) bool {
+    const size = fat.fileSize(path) orelse return false;
+    if (size <= capacity) return false;
+    console.err.print(
+        "[boot] {s} is {d} bytes, the staging buffer holds {d}\n",
+        .{ path, size, capacity },
+    ) catch {};
+    return true;
+}
 
 // EFI global variable namespace GUID (BootOrder, Boot####), on-disk bytes.
 const GLOBAL_GUID = [16]u8{
@@ -44,7 +59,7 @@ var dev: block.Device = undefined; // zippy:ignore unsafe_undefined
 /// Walk every block device in boot order and load the first bootable image.
 /// Returns null when no device holds one.
 pub fn loadBootImage() ?pe.Loaded {
-    const buf = @as([*]u8, @ptrFromInt(KERNEL_READ_BASE))[0..KERNEL_READ_MAX];
+    const buf = staging(mem.kernel_read_base, mem.kernel_read_size);
     if (!storage.init()) {
         console.out.writeAll("[boot] no block device found\n") catch {};
         return null;
@@ -80,6 +95,7 @@ fn tryDevice(sd: storage.Device, i: usize, buf: []u8) ?pe.Loaded {
     var path_buf: [256]u8 = undefined;
     const path = bootEntryPath(&path_buf) orelse FALLBACK_PATH;
     const n = filesystem.readFile(path, buf) orelse {
+        if (reportTooLarge(path, buf.len)) return null;
         console.out.print("[boot] device {d}: {s} not found on the ESP\n", .{ i, path }) catch {};
         return null;
     };
@@ -106,11 +122,17 @@ fn tryDevice(sd: storage.Device, i: usize, buf: []u8) ?pe.Loaded {
     tpm.measure(tpm.PCR_BOOT_LOADER, buf[0..n], "boot loader");
 
     // Optional initramfs from the ESP, served to the kernel stub via LoadFile2.
-    const initrd_buf = @as([*]u8, @ptrFromInt(INITRD_BASE))[0..INITRD_MAX];
-    if (filesystem.readFile("\\EFI\\BOOT\\initrd", initrd_buf)) |in| {
-        console.out.print("[boot] initrd: {d} bytes from \\EFI\\BOOT\\initrd\n", .{in}) catch {};
-        tpm.measure(tpm.PCR_BOOT_LOADER, initrd_buf[0..in], "initrd");
-        initrd.install(initrd_buf[0..in]);
+    // The small layout has no initrd staging buffer.
+    const initrd_path = "\\EFI\\BOOT\\initrd";
+    const initrd_buf = staging(mem.initrd_base, mem.initrd_size);
+    if (initrd_buf.len != 0) {
+        if (filesystem.readFile(initrd_path, initrd_buf)) |in| {
+            console.out.print("[boot] initrd: {d} bytes from {s}\n", .{ in, initrd_path }) catch {};
+            tpm.measure(tpm.PCR_BOOT_LOADER, initrd_buf[0..in], "initrd");
+            initrd.install(initrd_buf[0..in]);
+        } else {
+            _ = reportTooLarge(initrd_path, initrd_buf.len);
+        }
     }
 
     return pe.load(buf[0..n]) catch |e| {

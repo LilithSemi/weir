@@ -1,25 +1,48 @@
-//! Firmware memory layout, derived from a single `ram_base`.
+//! Firmware memory layout, derived from `ram_base` and the RAM size.
 //!
-//! This module computes every base-relative address from `ram_base`. ram_base
-//! comes from the SoC tree's /memory node at comptime. See soc.zig. So nothing
-//! assumes one SoC. build.zig reads the same tree for the linker base. The
-//! layout and the link address agree, with no -Dram-base option to keep in sync.
+//! ram_base and the RAM size come from the SoC tree's /memory node at comptime.
+//! See soc.zig. layout.zig turns the size into offsets. The linker script
+//! generator reads the same tree and uses the same layout.zig, so the link
+//! checks and the firmware agree.
 
 const soc = @import("soc");
+const layout = @import("layout.zig");
+
+comptime {
+    if (soc.ram_size < layout.min_ram)
+        @compileError("Weir needs at least 16 MiB of RAM. The /memory node of the device tree gives less.");
+}
+
+fn plan() layout.Layout {
+    return layout.compute(soc.ram_size, soc.hart_count);
+}
 
 /// Start of the RAM the firmware is linked into and runs from.
 pub const ram_base: usize = soc.ram_base;
+/// True for RAM under 128 MiB. See layout.zig.
+pub const small_layout = plan().page_pool == null;
 
-// Offsets from ram_base for the low firmware window and staging areas. Keep in
-// sync with the generated linker script's RAM_BASE.
-pub const fw_reserved_end = ram_base + 0x0200_0000; // end of reserved firmware region (32 MiB)
-pub const load_base = ram_base + 0x0200_0000; // PE/COFF image load base
-pub const acpi_pool_base = ram_base + 0x03f0_0000; // linked ACPI tables (just below the page pool)
-pub const acpi_pool_size = 0x10_0000; // 1 MiB
-pub const page_pool_base = ram_base + 0x0400_0000; // EFI AllocatePool/Pages bump pool (64 MiB)
-pub const kernel_read_base = ram_base + 0x0600_0000; // boot-manager kernel staging buffer
-pub const initrd_base = ram_base + 0x2000_0000; // initrd staging buffer (512 MiB)
+/// End of the reserved firmware window. The firmware stays in M-mode after the
+/// OS starts, so the OS must not use this memory.
+pub const fw_reserved_end: usize = ram_base + plan().fw_window;
+/// PE/COFF load base of the first image.
+pub const load_base: usize = ram_base + plan().load_base;
+/// The first image must end at or below this address.
+pub const load_limit: usize = ram_base + plan().loadLimit();
+/// Linked ACPI tables, reclaimable by the OS.
+pub const acpi_pool_base: usize = ram_base + plan().acpi_pool;
+pub const acpi_pool_size: usize = plan().acpi_pool_size;
+/// Start of the EFI page pool. Null when the pool starts after the loaded
+/// first image. See uefi.prepare.
+pub const page_pool_base: ?usize = if (plan().page_pool) |off| ram_base + off else null;
+/// Boot manager file staging buffer.
+pub const kernel_read_base: usize = ram_base + plan().staging;
+pub const kernel_read_size: usize = plan().staging_size;
+/// Staging buffer for `\EFI\BOOT\initrd`. A size of 0 disables it.
+pub const initrd_base: usize = ram_base + plan().initrd;
+pub const initrd_size: usize = plan().initrd_size;
+/// Number of 1 MiB S-mode payload stacks.
+pub const payload_stack_count: usize = plan().payload_stacks;
 
-/// Default top-of-RAM from the SoC tree's /memory size. The runtime DTB read in
-/// uefi.prepare can still refine it (e.g. for QEMU's -m).
+/// End of RAM from the SoC tree's /memory size.
 pub const ram_end_default = ram_base + soc.ram_size;

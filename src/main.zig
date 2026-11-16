@@ -102,7 +102,7 @@ pub fn boot(hartid: usize, dtb: usize) void {
         if (acpi_qemu.injectTpm2(platform.tpmBase())) |area| tpm.setLogArea(area.addr, area.len);
     }
     tpm.init();
-    if (boot_handoff.fsblPcr0(mem.ram_base)) |digest| {
+    if (boot_handoff.fsblPcr0(mem.ram_base, soc.ram_size)) |digest| {
         tpm.recordPrior(tpm.PCR_FIRMWARE, tpm.EV_POST_CODE, &digest, "weir firmware (FSBL)");
     } else {
         tpm.measureSelf(mem.ram_base);
@@ -455,7 +455,7 @@ fn enterPe(image: []const u8, hartid: usize, dtb: usize) ?Handoff {
 
 // Cap on a raw disk image read into high RAM. A bare boot PE is small; this
 // bounds the read off a slow card and reuses the boot manager's staging region.
-const raw_image_max: usize = 16 << 20;
+const raw_image_max: usize = @min(16 << 20, mem.kernel_read_size);
 
 /// Load a PE that sits as a bare image at sector 0, with no ESP or filesystem.
 /// It walks the same device-tree storage list the boot manager uses, so a virtio

@@ -24,16 +24,17 @@ pub const Loaded = struct {
     size: usize,
 };
 
-/// Fixed load base for EFI images: 32 MiB above ram_base, well clear of the
-/// firmware (which carries the embedded image in rodata) and the per-hart
-/// stacks. See mem.zig.
+/// Fixed load base for the first EFI image, at the end of the firmware window.
+/// It is clear of the firmware (which carries the embedded image in rodata) and
+/// the per-hart stacks. See mem.zig.
 pub const LOAD_BASE: usize = mem.load_base;
 
 /// Load a PE32+ EFI image at the fixed firmware load base. Used for the first
 /// image (the bootloader) that Weir enters after it drops to S-mode.
 pub fn load(image: []const u8) Error!Loaded {
-    // The image must fit below the ACPI pool that follows LOAD_BASE.
-    return loadAt(image, LOAD_BASE, mem.acpi_pool_base - LOAD_BASE);
+    // The image must end below the ACPI pool (large layout) or the file staging
+    // buffer (small layout).
+    return loadAt(image, LOAD_BASE, mem.load_limit - LOAD_BASE);
 }
 
 /// The in-memory footprint (size_of_image) of a PE32+ image, from its header.

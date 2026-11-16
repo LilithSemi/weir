@@ -4,16 +4,30 @@ const csr = @import("csr.zig");
 const cpu = @import("cpu.zig");
 const clint = @import("clint.zig");
 const console = @import("../../console/console.zig");
+const mem = @import("../../mem.zig");
+const soc = @import("soc");
 
 // Per-hart S-mode stacks for the payload. The firmware boot stack is small and
 // shared with the M-mode trap path. So the handoff switches to a clean 1 MiB
 // region. There is one per hart, so secondaries never share the boot hart's
-// stack.
-const MAX_HARTS = 8;
+// stack. The large layout has 8, the small layout one per hart in the tree.
+const stack_count = mem.payload_stack_count;
 // In .noinit. The stacks hold no initial data, so the M-mode bss clear must not
 // zero them. On the slow microcoded creek core, zeroing this 8 MiB cost about
 // 55 s of boot.
-var payload_stacks: [MAX_HARTS][1 << 20]u8 align(16) linksection(".noinit") = undefined;
+var payload_stacks: [stack_count][1 << 20]u8 align(16) linksection(".noinit") = undefined;
+
+/// The payload stack for this hart. The large layout indexes by the low bits
+/// of `hartid`. The small layout looks up mhartid in the tree, and gives null
+/// for a hart that is not there.
+fn payloadStack(hartid: usize) ?*[1 << 20]u8 {
+    if (!mem.small_layout) return &payload_stacks[hartid & (stack_count - 1)];
+    const id = csr.read("mhartid");
+    for (soc.harts, 0..) |h, i| {
+        if (h == id) return &payload_stacks[i];
+    }
+    return null;
+}
 
 const MSTATUS_MPP_MASK: usize = 3 << 11;
 const MSTATUS_MPP_S: usize = 1 << 11; // MPP = 0b01 (Supervisor)
@@ -170,7 +184,10 @@ pub fn enterSupervisor(entry: usize, hartid: usize, dtb: usize) noreturn {
     csr.write("mepc", entry);
 
     // Hand the payload a clean, generous, 16-byte-aligned per-hart stack.
-    const stack = &payload_stacks[hartid & (MAX_HARTS - 1)];
+    const stack = payloadStack(hartid) orelse {
+        console.err.print("[weir] hart {d} has no payload stack\n", .{csr.read("mhartid")}) catch {};
+        cpu.halt();
+    };
 
     // The payload stack is .noinit, so on real DRAM it starts as garbage. A
     // payload (or a Weir boot-service callback that runs on this stack) that reads
