@@ -1,4 +1,4 @@
-//! FSBL flow: console up, DDR up, copy main Weir into DRAM, jump to it.
+//! FSBL flow: console up, memory up, copy main Weir into DRAM, jump to it.
 
 const std = @import("std");
 const conduit = @import("conduit");
@@ -31,10 +31,10 @@ fn panicHandler(msg: []const u8, ret_addr: ?usize) noreturn {
 
 pub fn run(hartid: usize, dtb: usize) noreturn {
     uart_dev.init();
-    con.writeAll("\n[fsbl] Weir FSBL: DDR bring-up + main load\n") catch {};
+    con.writeAll("\n[fsbl] Weir FSBL: memory bring-up + main load\n") catch {};
 
     if (!ddr.init(con)) {
-        con.writeAll("[fsbl] FATAL: DDR read training failed. Halting\n") catch {};
+        con.writeAll("[fsbl] FATAL: memory bring-up failed. Halting\n") catch {};
         while (true) asm volatile ("wfi");
     }
 

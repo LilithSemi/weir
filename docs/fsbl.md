@@ -30,20 +30,28 @@ The code lives in `src/fsbl/`.
    flash load image into the DRAM window, then zeroes `.bss`.
 3. **Console.** It binds the UART and prints its progress, so a hang shows how
    far the boot got.
-4. **DDR.** It brings up and read-trains the DDR controller. A failure halts the
-   boot.
+4. **Memory.** It brings up the memory controller, and trains it when the tree
+   has a `training` node. A failure halts the boot.
 5. **Load.** It copies the main image out of flash into DRAM and verifies it.
 6. **Measure.** It measures the loaded image into the TPM before it runs, as the
    root of the measured-boot chain.
 7. **Jump.** It enters the main firmware at the DRAM base with the hart ID and
    the device-tree pointer, exactly as the platform would enter Weir directly.
 
-## DDR bring-up
+## Memory bring-up
 
-`src/fsbl/ddr.zig` brings up the DDR PHY and centres the read eye. It sweeps the
-per-lane read delays, finds a clean sampling window, and parks each lane at the
-centre. It reports the numbers over the UART, and a memtest checks the array
-before the boot continues.
+`src/fsbl/ddr.zig` brings up the memory controller, and a memtest checks the
+array before the boot continues. It gets the memory type from the compatible
+ids of the controller node, and its log lines start with that type:
+
+| Compatible | Prefix | Line when the FSBL does no training |
+| --- | --- | --- |
+| `harbor,ddr3-sdram` | `[fsbl] ddr3:` | `[fsbl] ddr3: hardware-calibrated` |
+| `harbor,sdr-sdram` | `[fsbl] sdr:` | `[fsbl] sdr: no calibration needed` |
+| neither | `[fsbl] ram:` | `[fsbl] ram: ready` |
+
+A DDR3 controller without a `training` node calibrates itself and holds the
+first access until it is ready. An SDR controller has no calibration.
 
 `src/fsbl/ddr_train.zig` is a generic training engine for controllers that do the
 JEDEC init in hardware but leave the PHY delay knobs open for the CPU to centre

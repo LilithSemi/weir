@@ -142,6 +142,14 @@ pub const ram_base: usize = if (firstMmio(.memory)) |r| @intCast(r.base) else 0x
 pub const ram_size: usize = if (firstMmio(.memory)) |r| @intCast(r.size) else 0x10000000;
 pub const flash_base: usize = if (firstMmio(.flash)) |r| @intCast(r.base) else 0x20000000;
 
+/// The compatible ids of the memory controller node. It is empty when the tree
+/// has no memory controller.
+pub const sdram_ids: []const []const u8 = blk: {
+    @setEvalBranchQuota(4_000_000);
+    var it = conduit.discover.ofClass(devices, .sdram);
+    break :blk if (it.next()) |m| m.ids.slice() else &.{};
+};
+
 // The SPI flash write port, the flash partitions and the CFI banks, read from
 // the tree in one walk.
 // A function, so the scan result exists at comptime only and takes no image space.

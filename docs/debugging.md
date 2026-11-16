@@ -51,8 +51,9 @@ access, but the SoC traps it, so it appears only on hardware.
 ## FSBL progress
 
 The FSBL prints a marker at each step: `[fsbl] train:` for the DDR training,
-`[fsbl] ddr:` for the read eye, and `[fsbl] flash:` for the image copy. The last
-marker before a stall says where it stopped.
+`[fsbl] ddr3:`, `[fsbl] sdr:` or `[fsbl] ram:` for the memory bring-up and
+memtest, and `[fsbl] flash:` for the image copy. The last marker before a stall
+says where it stopped. See [fsbl.md](fsbl.md#memory-bring-up) for the prefix.
 
 A trap in the FSBL prints one line and halts:
 

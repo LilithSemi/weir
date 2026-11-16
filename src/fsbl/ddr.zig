@@ -1,4 +1,6 @@
-//! DDR3 bring-up for the first-stage boot loader.
+//! Memory bring-up for the first-stage boot loader. The log prefix names the
+//! memory type from the controller's compatible ids. A Harbor SDR controller
+//! has no calibration, so the boot loader only checks the array.
 //!
 //! The Harbor DDR3 controller runs the JEDEC power-up and initialisation
 //! sequence in hardware. It supports two calibration modes, chosen when genip
@@ -20,6 +22,66 @@
 const std = @import("std");
 const cfg = @import("config.zig");
 const ddr_train = @import("ddr_train.zig");
+
+pub const MemoryType = enum { ddr3, sdr, unknown };
+
+/// The memory type that the controller's compatible ids name. A tree that
+/// does not name the type gives `unknown`.
+pub fn memoryType(ids: []const []const u8) MemoryType {
+    for (ids) |id| if (std.mem.eql(u8, id, "harbor,ddr3-sdram")) return .ddr3;
+    for (ids) |id| if (std.mem.eql(u8, id, "harbor,sdr-sdram")) return .sdr;
+    return .unknown;
+}
+
+/// The start of each log line of this module.
+pub fn logPrefix(comptime kind: MemoryType) []const u8 {
+    return comptime "[fsbl] " ++ switch (kind) {
+        .ddr3 => "ddr3",
+        .sdr => "sdr",
+        .unknown => "ram",
+    } ++ ": ";
+}
+
+/// The line for a controller that the boot loader does not train.
+pub fn readyLine(comptime kind: MemoryType) []const u8 {
+    return comptime logPrefix(kind) ++ switch (kind) {
+        // The controller calibrates itself and holds the first access until
+        // calibration is complete.
+        .ddr3 => "hardware-calibrated",
+        .sdr => "no calibration needed",
+        .unknown => "ready",
+    } ++ "\n";
+}
+
+const memory_type = memoryType(cfg.sdram_ids);
+const prefix = logPrefix(memory_type);
+
+test "the ulx3s controller is sdr sdram" {
+    const ids = [_][]const u8{ "harbor,sdram-controller", "harbor,sdr-sdram" };
+    try std.testing.expectEqual(MemoryType.sdr, memoryType(&ids));
+    try std.testing.expectEqualStrings("[fsbl] sdr: no calibration needed\n", readyLine(.sdr));
+    try std.testing.expectEqualStrings("[fsbl] sdr: ", logPrefix(.sdr));
+}
+
+test "the arty controller is ddr3 sdram" {
+    const ids = [_][]const u8{ "harbor,sdram-controller", "harbor,ddr3-sdram" };
+    try std.testing.expectEqual(MemoryType.ddr3, memoryType(&ids));
+    try std.testing.expectEqualStrings("[fsbl] ddr3: hardware-calibrated\n", readyLine(.ddr3));
+    try std.testing.expectEqualStrings("[fsbl] ddr3: ", logPrefix(.ddr3));
+}
+
+test "a controller that does not name its type gives a neutral prefix" {
+    const generic = [_][]const u8{"harbor,sdram-controller"};
+    try std.testing.expectEqual(MemoryType.unknown, memoryType(&generic));
+    try std.testing.expectEqual(MemoryType.unknown, memoryType(&.{}));
+    try std.testing.expectEqualStrings("[fsbl] ram: ready\n", readyLine(.unknown));
+    try std.testing.expectEqualStrings("[fsbl] ram: ", logPrefix(.unknown));
+}
+
+test "ddr3 wins when a controller lists both types" {
+    const ids = [_][]const u8{ "harbor,sdr-sdram", "harbor,ddr3-sdram" };
+    try std.testing.expectEqual(MemoryType.ddr3, memoryType(&ids));
+}
 
 /// The middle and top-of-array probe addresses, as a pure function of the
 /// usable DRAM range. `size` must already exclude any knob window (the device
@@ -95,7 +157,7 @@ pub fn memtest(con: *std.Io.Writer) bool {
         if (@as(*volatile u64, @ptrFromInt(sp)).* != vals[k]) e3 += 1;
         sp += 8;
     }
-    con.writeAll("[fsbl] ddr: memtest seq32=") catch {};
+    con.writeAll(prefix ++ "memtest seq32=") catch {};
     con.print("{X:0>8}", .{e1}) catch {};
     con.writeAll(" rw64=") catch {};
     con.print("{X:0>8}", .{e2}) catch {};
@@ -113,17 +175,18 @@ pub fn init(con: *std.Io.Writer) bool {
     // it added a `training` device-tree node that ddr_train reads at comptime.
     // Sweep the knob window (ddr_train verifies each setting with memtest).
     if (ddr_train.desc) |*d| {
-        con.writeAll("[fsbl] ddr: runtime training\n") catch {};
+        con.writeAll(prefix ++ "runtime training\n") catch {};
         if (!ddr_train.trainController(con, d, cfg.dram_base, memtest)) {
-            con.writeAll("[fsbl] ddr: training failed\n") catch {};
+            con.writeAll(prefix ++ "training failed\n") catch {};
             return false;
         }
-        con.writeAll("[fsbl] ddr: training complete\n") catch {};
+        con.writeAll(prefix ++ "training complete\n") catch {};
         return true;
     }
 
-    // Hardware calibration mode. The controller calibrated itself and stalled
-    // the first access until it was ready, so only the array check remains.
-    con.writeAll("[fsbl] ddr: hardware-calibrated\n") catch {};
+    // No runtime training. A DDR3 controller calibrated itself and stalled the
+    // first access until it was ready. An SDR controller has no calibration.
+    // Only the array check remains.
+    con.writeAll(readyLine(memory_type)) catch {};
     return memtest(con);
 }

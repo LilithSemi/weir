@@ -20,6 +20,10 @@ pub const dram_base: usize = soc.ram_base;
 /// `dram_base + dram_size` is the first byte memtest must not touch.
 pub const dram_size: usize = soc.ram_size;
 
+/// The compatible ids of the memory controller. ddr.zig gets the memory type
+/// from them.
+pub const sdram_ids: []const []const u8 = soc.sdram_ids;
+
 /// Memory-mapped (XIP) base of the SPI flash holding the main image.
 pub const flash_base: usize = soc.flash_base;
 

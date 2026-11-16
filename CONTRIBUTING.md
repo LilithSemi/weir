@@ -11,7 +11,7 @@ agree to uphold it.
 ## Repository layout
 
 - `src/` - the firmware. `main.zig` orchestrates the M-mode bring-up.
-- `src/fsbl/` - the first-stage boot loader (DDR bring-up and image load).
+- `src/fsbl/` - the first-stage boot loader (memory bring-up and image load).
 - `src/sbi/`, `src/uefi/`, `src/acpi/` - the SBI, UEFI, and ACPI providers.
 - `src/arch/riscv/` - the reset vector, the trap handler, and CSR access.
 - `src/console/`, `src/block/`, `src/tpm/`, ... - the firmware subsystems.
