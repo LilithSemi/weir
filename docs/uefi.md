@@ -17,7 +17,9 @@ address.
 
 Weir implements the memory, protocol, and hand-off calls a loader needs:
 
-- `AllocatePages`, `AllocatePool`, and their frees, from a simple page pool.
+- `AllocatePages`, `AllocatePool`, and their frees, from one page pool. The
+  pool frees and reuses memory, and a page allocation of 2 MiB or more is 2 MiB
+  aligned.
 - `GetMemoryMap` and `ExitBootServices`.
 - `InstallProtocolInterface`, `HandleProtocol`, `OpenProtocol`, `LocateProtocol`,
   and `LocateDevicePath`.

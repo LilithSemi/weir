@@ -237,6 +237,7 @@ pub fn build(b: *std.Build) void {
         "src/flash/spi_nor.zig",
         "src/smbios/structs.zig",
         "src/smbios/table.zig",
+        "src/uefi/page_alloc.zig",
         "src/var/efi.zig",
         "src/var/log.zig",
         "src/var/rt_abi.zig",

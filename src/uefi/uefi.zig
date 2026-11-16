@@ -16,6 +16,7 @@ const rt = @import("rt.zig");
 const handledb = @import("handledb.zig");
 const blockio = @import("blockio.zig");
 const initrd = @import("initrd.zig");
+const page_alloc = @import("page_alloc.zig");
 const pe = @import("../loader/pe.zig");
 const fat = @import("../fs/fat.zig");
 const soc = @import("soc");
@@ -127,55 +128,32 @@ const RiscvBootProtocol = extern struct {
     get_boot_hartid: *const fn (*RiscvBootProtocol, *usize) callconv(.c) Status,
 };
 
-// Single bump allocator from the high half of RAM, shared by AllocatePool and
+// One allocator over [PAGE_POOL_BASE, RAM_END), shared by AllocatePool and
 // AllocatePages. The Linux EFI stub asks for multi-MiB buffers (2 MiB FDT, the
 // relocated kernel), so it lives in conventional RAM, not a firmware array.
-var page_next: usize = PAGE_POOL_BASE;
+// prepare() sets it up. Until then it holds no memory.
+var pages: page_alloc.PageAllocator = .init(0, 0);
+var pool: page_alloc.Pool = .init(&pages);
 var map_key_seq: usize = 1;
 
-// Regions the bump allocator must not hand out: addresses the app pinned via
-// AllocatePages(AllocateAddress) (relocated kernel / FDT). The live initrd is
-// tracked separately (initrd.region). Both stop a later allocation from
-// aliasing a still-live buffer.
 const Region = struct { start: usize, end: usize };
-var reserved: [16]Region = undefined;
-var reserved_n: usize = 0;
 
-fn reserveRegion(start: usize, end: usize) void {
-    if (start >= end or reserved_n >= reserved.len) return;
-    reserved[reserved_n] = .{ .start = start, .end = end };
-    reserved_n += 1;
+// The part of [start, end) that lies in the pool, or null.
+fn poolPart(start: usize, end: usize) ?Region {
+    const s = @max(start, pages.base);
+    const e = @min(end, pages.end);
+    return if (s < e) .{ .start = s, .end = e } else null;
 }
 
-// If [start, end) overlaps a reserved region (or the live initrd), return the
-// highest end it hits so the caller can skip past all of them.
-fn reservedConflict(start: usize, end: usize) ?usize {
-    var skip: ?usize = null;
-    if (initrd.region()) |r| {
-        const rend = r.base + r.len;
-        if (start < rend and r.base < end and (skip == null or rend > skip.?)) skip = rend;
-    }
-    for (reserved[0..reserved_n]) |r| {
-        if (start < r.end and r.start < end and (skip == null or r.end > skip.?)) skip = r.end;
-    }
-    return skip;
+// Linux reserves its image up to the next 2 MiB boundary. A large allocation
+// that starts below that boundary would overlap it.
+fn pageAlignment(size: usize) usize {
+    return if (size >= 0x200000) 0x200000 else 4096;
 }
 
-// Bump-allocate `size` bytes aligned to `alignment`, stepping over any reserved
-// region in the way. Null when RAM is exhausted.
-fn bumpAlloc(size: usize, alignment: usize) ?usize {
-    var aligned = (page_next + alignment - 1) & ~(alignment - 1);
-    var guard: usize = 0;
-    while (guard <= reserved_n + 1) : (guard += 1) {
-        if (aligned + size > RAM_END) return null;
-        if (reservedConflict(aligned, aligned + size)) |skip| {
-            aligned = (skip + alignment - 1) & ~(alignment - 1);
-            continue;
-        }
-        page_next = aligned + size;
-        return aligned;
-    }
-    return null;
+fn wholePages(size: usize) ?usize {
+    const padded = std.math.add(usize, size, 4095) catch return null;
+    return padded & ~@as(usize, 4095);
 }
 
 const ok = @backingInt(Status.success);
@@ -188,6 +166,8 @@ const LoadedImage = struct {
     used: bool = false,
     handle: ?*handledb.Handle = null,
     entry: usize = 0,
+    /// The pool block that holds the image.
+    block: Region = .{ .start = 0, .end = 0 },
     li: uefi.protocol.LoadedImage = undefined, // zippy:ignore unsafe_undefined
 };
 var loaded_images: [MAX_LOADED_IMAGES]LoadedImage = undefined;
@@ -551,46 +531,59 @@ fn outString(self: *uefi.protocol.SimpleTextOutput, str: [*:0]const u16) callcon
 fn allocatePool(pool_type: u32, size: usize, buffer: *?*anyopaque) callconv(.c) usize {
     tr("allocatePool");
     _ = pool_type;
-    const addr = bumpAlloc(size, 8) orelse return @backingInt(Status.out_of_resources);
+    const addr = pool.alloc(size) orelse return @backingInt(Status.out_of_resources);
     buffer.* = @ptrFromInt(addr);
+    if (trace) console.out.print("[uefi]   -> pool at {x} size={d}\n", .{ addr, size }) catch {};
     return ok;
 }
 
 fn freePool(buffer: *anyopaque) callconv(.c) usize {
-    _ = buffer; // bump allocator: freeing is a no-op
-    return ok;
+    const addr = @intFromPtr(buffer);
+    if (trace) console.out.print("[uefi] freePool at={x}\n", .{addr}) catch {};
+    return if (pool.free(addr)) ok else @backingInt(Status.invalid_parameter);
 }
 
-fn allocatePages(alloc_type: u32, mem_type: u32, pages: usize, memory: *usize) callconv(.c) usize {
+fn allocatePages(alloc_type: u32, mem_type: u32, page_count: usize, memory: *usize) callconv(.c) usize {
     _ = mem_type;
-    const size = pages * 4096;
+    const out_of_resources = @backingInt(Status.out_of_resources);
     if (trace) console.out.print(
         "[uefi] allocatePages type={d} pages={d} at={x}\n",
-        .{ alloc_type, pages, memory.* },
+        .{ alloc_type, page_count, memory.* },
     ) catch {};
-    // AllocateAddress (2): honour the requested address, but reject placements
-    // outside RAM or onto the running firmware, and record the region so later
-    // bump allocations cannot alias it.
-    if (alloc_type == 2) {
-        const req = memory.*;
-        if (req < FW_RESERVED_END or req +% size < req or req + size > RAM_END) {
-            return @backingInt(Status.out_of_resources);
-        }
-        reserveRegion(req, req + size);
-        return ok;
-    }
-    // Linux reserves its image up to the next 2 MiB boundary. A large
-    // allocation that starts below that boundary would overlap it.
-    const alignment: usize = if (size >= 0x200000) 0x200000 else 4096;
-    const addr = bumpAlloc(size, alignment) orelse return @backingInt(Status.out_of_resources);
+    const size = std.math.mul(usize, page_count, 4096) catch return out_of_resources;
+    const limit: usize = switch (alloc_type) {
+        // AllocateAnyPages
+        0 => pages.end,
+        // AllocateMaxAddress: the block ends at or below memory.*.
+        1 => memory.* +| 1,
+        // AllocateAddress: reject placements outside RAM or onto the running
+        // firmware. The part in the pool must be free and page aligned. The
+        // part below the pool is not managed.
+        2 => {
+            const req = memory.*;
+            const end = std.math.add(usize, req, size) catch return out_of_resources;
+            if (req < FW_RESERVED_END or end > RAM_END) return out_of_resources;
+            if (poolPart(req, end)) |p| {
+                if (!pages.allocAt(p.start, p.end - p.start)) return not_found;
+            }
+            if (trace) console.out.print("[uefi]   -> pages at {x}\n", .{req}) catch {};
+            return ok;
+        },
+        else => return @backingInt(Status.invalid_parameter),
+    };
+    const addr = pages.alloc(size, pageAlignment(size), limit) orelse return out_of_resources;
     memory.* = addr;
     if (trace) console.out.print("[uefi]   -> pages at {x}\n", .{addr}) catch {};
     return ok;
 }
 
-fn freePages(memory: usize, pages: usize) callconv(.c) usize {
-    _ = memory;
-    _ = pages;
+// A range outside the pool is accepted and left alone.
+fn freePages(memory: usize, page_count: usize) callconv(.c) usize {
+    if (trace) console.out.print("[uefi] freePages at={x} pages={d}\n", .{ memory, page_count }) catch {};
+    if (memory % 4096 != 0) return @backingInt(Status.invalid_parameter);
+    const size = std.math.mul(usize, page_count, 4096) catch return @backingInt(Status.invalid_parameter);
+    const end = std.math.add(usize, memory, size) catch return @backingInt(Status.invalid_parameter);
+    if (poolPart(memory, end)) |p| pages.free(p.start, p.end - p.start);
     return ok;
 }
 
@@ -843,6 +836,9 @@ fn loadImage( // zippy:ignore too_many_params UEFI LoadImage ABI is fixed
     tr("loadImage");
 
     // The image bytes: an explicit buffer, or the file the device path names.
+    // A file goes to a scratch block that is freed once the image is loaded.
+    var scratch: ?Region = null;
+    defer if (scratch) |s| pages.free(s.start, s.end - s.start);
     const src: []const u8 = if (source_buffer) |sb| blk: {
         if (source_size == 0) return @backingInt(Status.invalid_parameter);
         break :blk sb[0..source_size];
@@ -851,8 +847,10 @@ fn loadImage( // zippy:ignore too_many_params UEFI LoadImage ABI is fixed
         var name_buf: [256]u8 = undefined;
         const path = devicePathFile(@ptrCast(dp), &name_buf) orelse return not_found;
         const fsize = fat.fileSize(path) orelse return not_found;
-        const scratch = bumpAlloc(fsize, 8) orelse return @backingInt(Status.out_of_resources);
-        const sbuf = @as([*]u8, @ptrFromInt(scratch))[0..fsize];
+        const ssize = wholePages(fsize) orelse return @backingInt(Status.out_of_resources);
+        const sbase = pages.alloc(ssize, 4096, pages.end) orelse return @backingInt(Status.out_of_resources);
+        scratch = .{ .start = sbase, .end = sbase + ssize };
+        const sbuf = @as([*]u8, @ptrFromInt(sbase))[0..fsize];
         // A multi-MiB image over polled SPI takes many seconds. Announce the read
         // so a slow load reads as progress, not a hang.
         const got_opt = fat.readFile(path, sbuf);
@@ -861,18 +859,22 @@ fn loadImage( // zippy:ignore too_many_params UEFI LoadImage ABI is fixed
         break :blk sbuf;
     };
 
-    // Place the image in a fresh page-aligned region above the loaded bootloader,
-    // and reserve it so no later allocation aliases the loaded image.
+    // Place the image in a fresh pool block, aligned as AllocatePages aligns a
+    // block of its size. The block stays allocated until UnloadImage.
     const image_size = pe.sizeOf(src) catch return @backingInt(Status.load_error);
-    const base = bumpAlloc(image_size, 4096) orelse return @backingInt(Status.out_of_resources);
-    reserveRegion(base, base + image_size);
+    const block_size = wholePages(image_size) orelse return @backingInt(Status.out_of_resources);
+    const base = pages.alloc(block_size, pageAlignment(block_size), pages.end) orelse return @backingInt(Status.out_of_resources);
+    var keep_image = false;
+    defer if (!keep_image) pages.free(base, block_size);
     const loaded = pe.loadAt(src, base, image_size) catch return @backingInt(Status.load_error);
 
     const slot = loadedImageSlot() orelse return @backingInt(Status.out_of_resources);
     const h = handledb.create() orelse return @backingInt(Status.out_of_resources);
+    keep_image = true;
     slot.used = true;
     slot.handle = h;
     slot.entry = loaded.entry;
+    slot.block = .{ .start = base, .end = base + block_size };
     // The app reads its own LoadedImage (and sets load_options for the command
     // line) before StartImage, so publish one on the new handle.
     slot.li = .{
@@ -913,13 +915,14 @@ fn startImage(image: uefi.Handle, exit_data_size: ?*usize, exit_data: ?*[*]u16) 
     return @backingInt(entry(image, &system_table));
 }
 
-/// UnloadImage: drop a loaded image the app chose not to start. The bump
-/// allocator keeps the region, so this only frees the registry slot and handle.
+/// UnloadImage: drop a loaded image the app chose not to start. This frees the
+/// registry slot, the handle and the image block.
 fn unloadImage(image: uefi.Handle) callconv(.c) usize {
     const h: *handledb.Handle = @ptrCast(@alignCast(image));
     if (findLoadedImage(h)) |slot| {
         slot.used = false;
         if (slot.handle) |hh| hh.used = false;
+        pages.free(slot.block.start, slot.block.end - slot.block.start);
     }
     return ok;
 }
@@ -1204,6 +1207,17 @@ pub fn prepare(dtb: usize, hartid: usize, image_base: usize, image_size: usize) 
     // clamped above our page pool so a large kernel + initrd has room.
     const ram_top = soc.ram_base + soc.ram_size;
     if (ram_top > PAGE_POOL_BASE + 0x100000) RAM_END = ram_top;
+
+    // The boot sources install the initrd before they call prepare(), and the
+    // first allocation comes later through a boot service. Take the page
+    // rounded initrd out of the pool so nothing is allocated over it.
+    pages = .init(PAGE_POOL_BASE, RAM_END);
+    pool = .init(&pages);
+    if (initrd.region()) |r| {
+        const s = r.base & ~@as(usize, 4095);
+        const e = std.mem.alignForward(usize, r.base + r.len, 4096);
+        if (poolPart(s, e)) |p| _ = pages.allocAt(p.start, p.end - p.start);
+    }
 
     // Simple Text Output: real output, the rest succeed as no-ops.
     con_out_mode = .{
