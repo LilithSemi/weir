@@ -2,6 +2,7 @@
 //! QEMU CFI flash, as the device tree tells at build time.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const soc = @import("soc");
 const build_options = @import("build_options");
 const console = @import("../console/console.zig");
@@ -52,6 +53,16 @@ const SpiFlash = struct {
         @memcpy(buf, src[0..buf.len]);
     }
 
+    /// The data cache can hold old lines of the xip window. On River only `fence.i`
+    /// empties the data cache, so the next read gets the bytes from the flash.
+    pub fn sync(self: *SpiFlash) void {
+        _ = self;
+        switch (builtin.cpu.arch) {
+            .riscv64 => asm volatile ("fence.i" ::: .{ .memory = true }),
+            else => @compileError("the SPI flash store needs riscv64"),
+        }
+    }
+
     pub fn erase(self: *SpiFlash, off: usize) bool {
         return self.driver.eraseSector(@intCast(partition.offset + off));
     }
@@ -74,6 +85,11 @@ const CfiFlash = struct {
 
     pub fn read(self: *CfiFlash, off: usize, buf: []u8) void {
         self.bank.read(off, buf);
+    }
+
+    /// The bank is in read array mode after each erase and program.
+    pub fn sync(self: *CfiFlash) void {
+        _ = self;
     }
 
     pub fn erase(self: *CfiFlash, off: usize) bool {

@@ -74,6 +74,8 @@ pub const Key = struct {
 pub const bank_header_len = @sizeOf(BankHeader);
 pub const record_header_len = @sizeOf(RecordHeader);
 const record_align = 4;
+/// Bytes of the stack buffer that a read back uses.
+const read_back_len = 128;
 
 fn checkLayout(comptime T: type, comptime size: usize) void {
     if (@sizeOf(T) != size) @compileError(@typeName(T) ++ " has the wrong size");
@@ -287,6 +289,8 @@ fn checkName(name: []const u16) SetError!void {
     if (name[name.len - 1] != 0) return error.InvalidParameter;
 }
 
+/// `Flash` has `read`, `erase`, `program` and `sync`. The store calls `sync` before
+/// each read that follows a write, so that the read gets the bytes on the flash.
 pub fn Store(comptime Flash: type, comptime geo: Geometry) type {
     comptime {
         if (geo.bank_len % record_align != 0) @compileError("bank_len must be a multiple of 4");
@@ -356,6 +360,9 @@ pub fn Store(comptime Flash: type, comptime geo: Geometry) type {
             return header.sequence;
         }
 
+        /// Reads the active bank into the mirror. It compacts when the log has a bad record or bytes after the last record.
+        /// A weakly programmed byte that reads as erased is not found here. The read back of the append that
+        /// lands on it finds it when the byte then reads wrong. If not, a later load finds it with the record CRC.
         pub fn load(self: *Self) LoadResult {
             self.ram_end = 0;
             @memset(&self.mirror, 0xff);
@@ -475,7 +482,8 @@ pub fn Store(comptime Flash: type, comptime geo: Geometry) type {
 
         fn append(self: *Self, item: Item) SetError!void {
             const len = writeRecord(&self.scratch, item);
-            if (!self.flash.program(geo.bank_offsets[self.active] + self.end, self.scratch[0..len])) {
+            const off = geo.bank_offsets[self.active] + self.end;
+            if (!self.flash.program(off, self.scratch[0..len]) or !self.readBack(off, self.scratch[0..len])) {
                 self.needs_compaction = true;
                 return error.DeviceError;
             }
@@ -511,6 +519,7 @@ pub fn Store(comptime Flash: type, comptime geo: Geometry) type {
         }
 
         /// Erases `bank` and programs `scratch` up to `end` into it, the valid mark last.
+        /// The whole bank must read back as `scratch` before the valid mark is programmed.
         fn writeBank(self: *Self, bank: u1, end: usize) bool {
             const base = geo.bank_offsets[bank];
             var off: usize = 0;
@@ -524,7 +533,24 @@ pub fn Store(comptime Flash: type, comptime geo: Geometry) type {
                 if (!self.flash.program(base + off, self.scratch[off..][0..len])) return false;
                 off += len;
             }
-            return self.flash.program(base + @offsetOf(BankHeader, "valid"), std.mem.asBytes(&valid_mark));
+            if (!self.readBack(base, &self.scratch)) return false;
+            const mark_off = base + @offsetOf(BankHeader, "valid");
+            const mark = std.mem.asBytes(&valid_mark);
+            return self.flash.program(mark_off, mark) and self.readBack(mark_off, mark);
+        }
+
+        /// Reads `expected.len` bytes at `off` from the flash and compares them with `expected`.
+        fn readBack(self: *Self, off: usize, expected: []const u8) bool {
+            self.flash.sync();
+            var buf: [read_back_len]u8 = undefined;
+            var done: usize = 0;
+            while (done < expected.len) {
+                const n = @min(buf.len, expected.len - done);
+                self.flash.read(off + done, buf[0..n]);
+                if (!std.mem.eql(u8, buf[0..n], expected[done..][0..n])) return false;
+                done += n;
+            }
+            return true;
         }
 
         fn writeRam(self: *Self, item: Item) SetError!void {
@@ -545,7 +571,10 @@ pub fn Store(comptime Flash: type, comptime geo: Geometry) type {
     };
 }
 
-/// A flash model for tests. It can cut one operation short to model a power loss.
+pub const FlashEvent = enum { erase, program, sync, read };
+
+/// A flash model for tests. It can cut one operation short to model a power loss,
+/// and it can make one byte read differently from what was programmed or erased.
 pub fn RamFlash(comptime size: usize) type {
     return struct {
         const Self = @This();
@@ -560,28 +589,62 @@ pub fn RamFlash(comptime size: usize) type {
         /// The full length of the cut operation.
         cut_len: usize = 0,
         dead: bool = false,
+        /// The next program that covers this offset clears one more bit of the byte.
+        program_fault_at: ?usize = null,
+        /// The next erase that covers this offset leaves the byte at 0xfe.
+        erase_fault_at: ?usize = null,
+        reads: usize = 0,
+        /// The first calls since `events_len` was set to 0.
+        events: [64]FlashEvent = undefined,
+        events_len: usize = 0,
 
         pub fn init(erase_size: usize) Self {
             return .{ .data = @splat(0xff), .erase_size = erase_size };
         }
 
-        pub fn read(self: *const Self, off: usize, buf: []u8) void {
+        pub fn read(self: *Self, off: usize, buf: []u8) void {
+            self.note(.read);
+            self.reads += 1;
             @memcpy(buf, self.data[off..][0..buf.len]);
         }
 
+        pub fn sync(self: *Self) void {
+            self.note(.sync);
+        }
+
         pub fn erase(self: *Self, off: usize) bool {
+            self.note(.erase);
             const start = off / self.erase_size * self.erase_size;
             var n = self.erase_size;
             if (!self.begin(&n)) return false;
             @memset(self.data[start..][0..n], 0xff);
+            if (takeFault(&self.erase_fault_at, start, n)) |at| self.data[at] = 0xfe;
             return !self.dead;
         }
 
         pub fn program(self: *Self, off: usize, bytes: []const u8) bool {
+            self.note(.program);
             var n = bytes.len;
             if (!self.begin(&n)) return false;
             for (bytes[0..n], self.data[off..][0..n]) |b, *d| d.* &= b;
+            if (takeFault(&self.program_fault_at, off, n)) |at| {
+                // A byte of 0 has no bit left to clear, so the test must pick another offset.
+                std.debug.assert(self.data[at] != 0);
+                self.data[at] &= self.data[at] - 1;
+            }
             return !self.dead;
+        }
+
+        fn takeFault(fault: *?usize, start: usize, n: usize) ?usize {
+            const at = fault.* orelse return null;
+            if (at < start or at >= start + n) return null;
+            fault.* = null;
+            return at;
+        }
+
+        fn note(self: *Self, event: FlashEvent) void {
+            if (self.events_len < self.events.len) self.events[self.events_len] = event;
+            self.events_len += 1;
         }
 
         /// Counts one operation. It lowers `n` when this operation is the cut one.
@@ -1319,6 +1382,203 @@ test "a torn append followed by a reload gives recovered" {
     third.setup(&flash);
     try testing.expectEqual(LoadResult.loaded, third.load());
     try expectData(&third, wide("A"), &guid_a, "one");
+}
+
+test "a fault model byte reads with one more bit cleared after the program or erase that covers it" {
+    var flash = TestFlash.init(1024);
+    flash.program_fault_at = 5;
+    try testing.expect(flash.program(0, &.{ 0xff, 0xff, 0xff, 0xff }));
+    try testing.expectEqual(@as(?usize, 5), flash.program_fault_at);
+    try testing.expect(flash.program(4, &.{ 0x13, 0x13 }));
+    try testing.expectEqualSlices(u8, &.{ 0x13, 0x12 }, flash.data[4..6]);
+    try testing.expectEqual(@as(?usize, null), flash.program_fault_at);
+
+    flash.erase_fault_at = 1500;
+    try testing.expect(flash.erase(0));
+    try testing.expect(flash.erase(1024));
+    try testing.expectEqual(@as(u8, 0xfe), flash.data[1500]);
+    try testing.expect(flash.erase(1024));
+    try testing.expectEqual(@as(u8, 0xff), flash.data[1500]);
+}
+
+/// Sets `A` and `B`, then sets `F` to 100 byte values until the next 100 byte record does not fit.
+fn fillActiveBank(store: *TestStore) !void {
+    try store.set(wide("A"), &guid_a, nv_attribute, "old");
+    try store.set(wide("B"), &guid_a, nv_attribute, "bravo");
+    const sequence = store.sequence;
+    var n: u8 = 0;
+    while (bankRemaining(store) >= recordLen(4, 100)) : (n += 1) {
+        const value: [100]u8 = @splat(n);
+        try store.set(wide("F"), &guid_a, nv_attribute, &value);
+    }
+    try testing.expectEqual(sequence, store.sequence);
+}
+
+/// Checks `B` and `F` and gives which value `A` has.
+fn checkFilled(store: *const TestStore, f: []const u8, new: []const u8) !Seen {
+    try expectData(store, wide("B"), &guid_a, "bravo");
+    try expectData(store, wide("F"), &guid_a, f);
+    const a = store.get(wide("A"), &guid_a) orelse return error.TestUnexpectedResult;
+    if (std.mem.eql(u8, a.data, "old")) return .old;
+    if (std.mem.eql(u8, a.data, new)) return .new;
+    return error.TestUnexpectedResult;
+}
+
+test "an append that reads back wrong gives DeviceError and the next set compacts" {
+    var flash = TestFlash.init(1024);
+    var store: TestStore = undefined;
+    store.setup(&flash);
+    _ = store.load();
+    try store.set(wide("A"), &guid_a, nv_attribute, "one");
+    const end = store.end;
+    // The first data byte of the next record.
+    flash.program_fault_at = test_geo.bank_offsets[store.active] + end + record_header_len + 4;
+    try testing.expectError(error.DeviceError, store.set(wide("A"), &guid_a, nv_attribute, "two"));
+    try testing.expectEqual(@as(?usize, null), flash.program_fault_at);
+    try testing.expect(store.needs_compaction);
+    try testing.expectEqual(end, store.end);
+    try testing.expect(allErased(store.mirror[end..]));
+    try expectData(&store, wide("A"), &guid_a, "one");
+
+    try store.set(wide("A"), &guid_a, nv_attribute, "two");
+    try testing.expect(!store.needs_compaction);
+    try testing.expectEqual(@as(u32, 2), store.sequence);
+    try expectData(&store, wide("A"), &guid_a, "two");
+
+    var again: TestStore = undefined;
+    again.setup(&flash);
+    try testing.expectEqual(LoadResult.loaded, again.load());
+    try expectData(&again, wide("A"), &guid_a, "two");
+}
+
+test "a compaction whose image reads back wrong gives DeviceError and keeps the old bank" {
+    var flash = TestFlash.init(1024);
+    var store: TestStore = undefined;
+    store.setup(&flash);
+    _ = store.load();
+    try fillActiveBank(&store);
+    const f: [100]u8 = store.get(wide("F"), &guid_a).?.data[0..100].*;
+    const active = store.active;
+    const end = store.end;
+    const new: [100]u8 = @splat(0x5a);
+    // The first data byte of `B`, the first record of the new bank.
+    flash.program_fault_at = test_geo.bank_offsets[~active] + bank_header_len + record_header_len + 4;
+    try testing.expectError(error.DeviceError, store.set(wide("A"), &guid_a, nv_attribute, &new));
+    try testing.expectEqual(@as(?usize, null), flash.program_fault_at);
+    try testing.expect(store.needs_compaction);
+    try testing.expectEqual(active, store.active);
+    try testing.expectEqual(@as(u32, 1), store.sequence);
+    try testing.expectEqual(end, store.end);
+    try testing.expectEqual(Seen.old, try checkFilled(&store, &f, &new));
+
+    var again: TestStore = undefined;
+    again.setup(&flash);
+    try testing.expectEqual(LoadResult.loaded, again.load());
+    try testing.expectEqual(active, again.active);
+    try testing.expectEqual(Seen.old, try checkFilled(&again, &f, &new));
+}
+
+test "a compaction whose valid mark reads back wrong gives DeviceError and a reload is consistent" {
+    var flash = TestFlash.init(1024);
+    var store: TestStore = undefined;
+    store.setup(&flash);
+    _ = store.load();
+    try fillActiveBank(&store);
+    const f: [100]u8 = store.get(wide("F"), &guid_a).?.data[0..100].*;
+    const active = store.active;
+    const end = store.end;
+    const new: [100]u8 = @splat(0x5a);
+    flash.program_fault_at = test_geo.bank_offsets[~active] + @offsetOf(BankHeader, "valid");
+    try testing.expectError(error.DeviceError, store.set(wide("A"), &guid_a, nv_attribute, &new));
+    try testing.expectEqual(@as(?usize, null), flash.program_fault_at);
+    try testing.expectEqual(active, store.active);
+    try testing.expectEqual(@as(u32, 1), store.sequence);
+    try testing.expectEqual(end, store.end);
+    try testing.expectEqual(Seen.old, try checkFilled(&store, &f, &new));
+
+    var again: TestStore = undefined;
+    again.setup(&flash);
+    _ = again.load();
+    _ = try checkFilled(&again, &f, &new);
+
+    // The store in use tries the compaction again on the next set.
+    try store.set(wide("A"), &guid_a, nv_attribute, &new);
+    try testing.expectEqual(~active, store.active);
+    var third: TestStore = undefined;
+    third.setup(&flash);
+    try testing.expectEqual(LoadResult.loaded, third.load());
+    try testing.expectEqual(Seen.new, try checkFilled(&third, &f, &new));
+}
+
+test "a compaction fails when the erase leaves a byte that is not erased" {
+    var flash = TestFlash.init(1024);
+    var store: TestStore = undefined;
+    store.setup(&flash);
+    _ = store.load();
+    try fillActiveBank(&store);
+    const f: [100]u8 = store.get(wide("F"), &guid_a).?.data[0..100].*;
+    const active = store.active;
+    const new: [100]u8 = @splat(0x5a);
+    // Past the records that the compaction programs.
+    flash.erase_fault_at = test_geo.bank_offsets[~active] + 3000;
+    try testing.expectError(error.DeviceError, store.set(wide("A"), &guid_a, nv_attribute, &new));
+    try testing.expectEqual(@as(?usize, null), flash.erase_fault_at);
+    try testing.expectEqual(active, store.active);
+    try testing.expectEqual(Seen.old, try checkFilled(&store, &f, &new));
+
+    var again: TestStore = undefined;
+    again.setup(&flash);
+    try testing.expectEqual(LoadResult.loaded, again.load());
+    try testing.expectEqual(active, again.active);
+    try testing.expectEqual(Seen.old, try checkFilled(&again, &f, &new));
+}
+
+test "the store syncs after a write and before each read back" {
+    var flash = TestFlash.init(1024);
+    var store: TestStore = undefined;
+    store.setup(&flash);
+    _ = store.load();
+
+    flash.events_len = 0;
+    try store.set(wide("A"), &guid_a, nv_attribute, "first");
+    const chunks = test_geo.bank_len / read_back_len;
+    var expected: [4 + 2 + 1 + chunks + 3]FlashEvent = undefined;
+    @memset(expected[0..4], .erase);
+    @memset(expected[4..6], .program);
+    expected[6] = .sync;
+    @memset(expected[7..][0..chunks], .read);
+    expected[7 + chunks ..][0..3].* = .{ .program, .sync, .read };
+    try testing.expectEqualSlices(FlashEvent, &expected, flash.events[0..flash.events_len]);
+
+    flash.events_len = 0;
+    try store.set(wide("A"), &guid_a, nv_attribute, "second");
+    try testing.expectEqualSlices(FlashEvent, &.{ .program, .sync, .read }, flash.events[0..flash.events_len]);
+
+    flash.events_len = 0;
+    try testing.expect(try store.remove(wide("A"), &guid_a));
+    try testing.expectEqualSlices(FlashEvent, &.{ .program, .sync, .read }, flash.events[0..flash.events_len]);
+}
+
+test "get and next read the mirror and not the flash" {
+    var flash = TestFlash.init(1024);
+    var store: TestStore = undefined;
+    store.setup(&flash);
+    _ = store.load();
+    try store.set(wide("A"), &guid_a, nv_attribute, "one");
+    try store.set(wide("B"), &guid_a, nv_attribute, "two");
+    try store.set(wide("V"), &guid_a, 0x6, "ram");
+    var again: TestStore = undefined;
+    again.setup(&flash);
+    _ = again.load();
+
+    const reads = flash.reads;
+    try expectData(&again, wide("A"), &guid_a, "one");
+    try testing.expectEqual(@as(?Entry, null), again.get(wide("C"), &guid_a));
+    var count: usize = 0;
+    var key = again.next(null);
+    while (key) |k| : (key = again.next(k)) count += 1;
+    try testing.expectEqual(@as(usize, 2), count);
+    try testing.expectEqual(reads, flash.reads);
 }
 
 /// Which of the two allowed values a reload found.

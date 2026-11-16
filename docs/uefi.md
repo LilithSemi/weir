@@ -58,6 +58,12 @@ the log. Weir drops it, keeps the data before it, and prints
 `[var] recovered after an incomplete write`. A power loss during a compaction
 leaves the old bank active, and Weir prints nothing.
 
+Weir reads back each record after it writes it, and it reads back each new bank
+before it writes the valid mark. When the bytes on the flash are different, the
+write gives `EFI_DEVICE_ERROR` and the running system keeps the old value. After
+a reset the variable can have the old value or the new value. The next write
+copies the live records to the other bank first.
+
 | Item | Limit |
 | --- | --- |
 | Variable name | 255 characters |
