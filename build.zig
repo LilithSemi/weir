@@ -239,6 +239,7 @@ pub fn build(b: *std.Build) void {
     const pure_tests = [_][]const u8{
         "src/acpi/madt.zig",
         "src/acpi/tables.zig",
+        "src/boot/extlinux.zig",
         "src/flash/cfi.zig",
         "src/flash/spi_nor.zig",
         "src/layout.zig",

@@ -1,18 +1,21 @@
 //! UEFI-style boot manager.
 //!
 //! Mounts the ESP (GPT, or whole disk as a bare filesystem) and resolves what to
-//! boot: the BootOrder / Boot#### EFI variables if present, else the removable-
-//! media fallback path \EFI\BOOT\BOOTRISCV64.EFI. The chosen PE is handed to the
-//! PE loader.
+//! boot: the BootOrder / Boot#### EFI variables if present, else a kernel from
+//! an extlinux configuration, else the removable-media fallback path
+//! \EFI\BOOT\BOOTRISCV64.EFI. The chosen PE is handed to the PE loader.
 
 const std = @import("std");
 const storage = @import("../block/storage.zig");
 const block = @import("../block/block.zig");
 const gpt = @import("../block/gpt.zig");
 const fat = @import("../fs/fat.zig");
+const fs = @import("../fs/fs.zig");
 const pe = @import("../loader/pe.zig");
+const extlinux = @import("extlinux.zig");
 const var_store = @import("../var/store.zig");
 const rt = @import("../uefi/rt.zig");
+const uefi = @import("../uefi/uefi.zig");
 const initrd = @import("../uefi/initrd.zig");
 const simplefs = @import("../uefi/simplefs.zig");
 const blockio = @import("../uefi/blockio.zig");
@@ -93,7 +96,31 @@ fn tryDevice(sd: storage.Device, i: usize, buf: []u8) ?pe.Loaded {
     };
 
     var path_buf: [256]u8 = undefined;
-    const path = bootEntryPath(&path_buf) orelse FALLBACK_PATH;
+    if (bootEntryPath(&path_buf)) |path| return loadEfiFile(sd, i, part, filesystem, path, buf);
+    if (loadExtlinux(sd, part, filesystem, buf)) |loaded| return loaded;
+    return loadEfiFile(sd, i, part, filesystem, FALLBACK_PATH, buf);
+}
+
+/// Name the disk in the device path after the real boot media (controller kind
+/// and MMIO base), so the ESP handle carries a distinct path a boot loader can
+/// match. Then publish the ESP via Simple File System so the loaded image reads
+/// its files.
+fn publish(sd: storage.Device, part: block.Partition) void {
+    blockio.setBootMedia(@backingInt(sd.kind), sd.base);
+    if (handledb.create()) |h| {
+        if (simplefs.install(h, part))
+            console.out.writeAll("[boot] ESP published via Simple File System\n") catch {};
+    }
+}
+
+fn loadEfiFile(
+    sd: storage.Device,
+    i: usize,
+    part: block.Partition,
+    filesystem: fs.Fs,
+    path: []const u8,
+    buf: []u8,
+) ?pe.Loaded {
     const n = filesystem.readFile(path, buf) orelse {
         if (reportTooLarge(path, buf.len)) return null;
         console.out.print("[boot] device {d}: {s} not found on the ESP\n", .{ i, path }) catch {};
@@ -104,15 +131,7 @@ fn tryDevice(sd: storage.Device, i: usize, buf: []u8) ?pe.Loaded {
         .{ path, i, n },
     ) catch {};
 
-    // Committed to this device. Name the disk in the device path after the real
-    // boot media (controller kind + MMIO base), so the ESP handle carries a
-    // distinct path a bootloader can match, then publish the ESP via Simple File
-    // System so the loaded bootloader reads its config, kernel, and initrd.
-    blockio.setBootMedia(@backingInt(sd.kind), sd.base);
-    if (handledb.create()) |h| {
-        if (simplefs.install(h, part))
-            console.out.writeAll("[boot] ESP published via Simple File System\n") catch {};
-    }
+    publish(sd, part);
 
     // The boot path is part of the measured boot configuration.
     tpm.measure(tpm.PCR_BOOT_CONFIG, path, "boot path");
@@ -139,6 +158,165 @@ fn tryDevice(sd: storage.Device, i: usize, buf: []u8) ?pe.Loaded {
         console.err.print("[boot] PE load failed: {s}\n", .{@errorName(e)}) catch {};
         return null;
     };
+}
+
+const extlinux_paths = [_][]const u8{
+    "\\extlinux\\extlinux.conf",
+    "\\boot\\extlinux\\extlinux.conf",
+};
+
+// The `append` line as UTF-16 with a terminator. The kernel reads it through
+// its loaded image protocol, so it lives in the firmware.
+var kernel_cmdline: [extlinux.max_append + 1]u16 = undefined;
+
+const two_mib = 2 << 20;
+
+/// Boot a kernel with an EFI stub from an extlinux configuration on the ESP.
+/// Returns null, after a log line, when there is no configuration or its entry
+/// cannot be used.
+fn loadExtlinux(sd: storage.Device, part: block.Partition, filesystem: fs.Fs, buf: []u8) ?pe.Loaded {
+    const config_path = for (extlinux_paths) |p| {
+        if (fat.fileSize(p) != null) break p;
+    } else return null;
+    if (buf.len <= extlinux.max_file) return null;
+
+    // The configuration stays at the top of the staging buffer while the kernel
+    // is read below it.
+    const text_buf = buf[buf.len - extlinux.max_file ..];
+    const kernel_buf = buf[0 .. buf.len - extlinux.max_file];
+    const text_len = filesystem.readFile(config_path, text_buf) orelse {
+        console.err.print(
+            "[boot] extlinux: {s} cannot be read or is larger than {d} bytes\n",
+            .{ config_path, extlinux.max_file },
+        ) catch {};
+        return null;
+    };
+    const text = text_buf[0..text_len];
+
+    var paths: extlinux.Paths = .{};
+    const entry = extlinux.parse(text, config_path, &paths) catch |e| {
+        console.err.print("[boot] extlinux: {s} cannot be used, {s}\n", .{ config_path, parseError(e) }) catch {};
+        return null;
+    };
+    console.out.print("[boot] extlinux: {s}, label {s}\n", .{ config_path, entry.label }) catch {};
+    if (entry.include)
+        console.out.writeAll("[boot] extlinux: include is not supported, the include lines are ignored\n") catch {};
+    if (entry.extra_initrds)
+        console.out.writeAll("[boot] extlinux: only the first initrd is used, the others are ignored\n") catch {};
+    if (entry.fdt)
+        console.out.writeAll("[boot] extlinux: the device tree keys are ignored, Weir passes its own tree\n") catch {};
+
+    var options: ?[:0]u16 = null;
+    if (entry.append) |args| {
+        std.debug.assert(args.len <= extlinux.max_append);
+        const len = std.unicode.utf8ToUtf16Le(&kernel_cmdline, args) catch {
+            console.err.writeAll("[boot] extlinux: the append line is not valid UTF-8\n") catch {};
+            return null;
+        };
+        kernel_cmdline[len] = 0;
+        options = kernel_cmdline[0..len :0];
+    }
+
+    const kernel_len = filesystem.readFile(entry.kernel, kernel_buf) orelse {
+        if (fat.fileSize(entry.kernel)) |size| {
+            if (size <= kernel_buf.len) {
+                console.err.print("[boot] extlinux: the read of {s} failed\n", .{entry.kernel}) catch {};
+            } else console.err.print(
+                "[boot] extlinux: {s} is {d} bytes, the staging buffer holds {d}\n",
+                .{ entry.kernel, size, kernel_buf.len },
+            ) catch {};
+        } else {
+            console.err.print("[boot] extlinux: {s} not found\n", .{entry.kernel}) catch {};
+        }
+        return null;
+    };
+    console.out.print("[boot] extlinux: kernel {s}, {d} bytes\n", .{ entry.kernel, kernel_len }) catch {};
+    const kernel = kernel_buf[0..kernel_len];
+    const loaded = loadKernel(entry.kernel, kernel) orelse return null;
+
+    publish(sd, part);
+    uefi.setLoadOptions(options);
+    tpm.measure(tpm.PCR_BOOT_CONFIG, config_path, "boot path");
+    tpm.measure(tpm.PCR_BOOT_CONFIG, text, "extlinux config");
+    if (entry.append) |args| tpm.measure(tpm.PCR_BOOT_CONFIG, args, "kernel command line");
+    tpm.measure(tpm.PCR_BOOT_LOADER, kernel, "kernel");
+
+    if (entry.append) |args|
+        console.out.print("[boot] extlinux: append {s}\n", .{args}) catch {};
+    // The staging buffer is free now. The initrd read can overwrite it, and
+    // the configuration text with it.
+    if (entry.initrd) |path| loadInitrd(filesystem, path, loaded);
+    return loaded;
+}
+
+fn parseError(e: extlinux.Error) []const u8 {
+    return switch (e) {
+        error.FileTooLarge => "the file is too large",
+        error.LineTooLong => "a line is longer than 1024 bytes",
+        error.PathTooLong => "a path is longer than 256 bytes",
+        error.BadPath => "a path has no file name or goes above the root",
+        error.MissingValue => "a key has no value",
+        error.NoLabel => "it has no label",
+        error.NoKernel => "the label has no kernel",
+    };
+}
+
+/// Load the kernel in the first image window. When it does not fit there, the
+/// large layout loads it above the file staging buffer, in the page pool.
+fn loadKernel(path: []const u8, kernel: []const u8) ?pe.Loaded {
+    const size = pe.sizeOf(kernel) catch {
+        console.err.print("[boot] extlinux: {s} is not an EFI image\n", .{path}) catch {};
+        return null;
+    };
+    const window = mem.load_limit - mem.load_base;
+    const result = if (size <= window) pe.load(kernel) else blk: {
+        if (mem.small_layout) {
+            console.err.print(
+                "[boot] extlinux: {s} needs {d} bytes, the load window holds {d}\n",
+                .{ path, size, window },
+            ) catch {};
+            return null;
+        }
+        const base = std.mem.alignForward(usize, mem.kernel_read_base + mem.kernel_read_size, two_mib);
+        const end = std.math.add(usize, base, size) catch mem.ram_end_default + 1;
+        if (end > mem.ram_end_default) {
+            console.err.print("[boot] extlinux: {s} needs {d} bytes and does not fit in RAM\n", .{ path, size }) catch {};
+            return null;
+        }
+        break :blk pe.loadAt(kernel, base, size);
+    };
+    return result catch |e| {
+        console.err.print("[boot] extlinux: {s} did not load, {s}\n", .{ path, @errorName(e) }) catch {};
+        return null;
+    };
+}
+
+/// Read the initrd to the first 2 MiB boundary after the kernel and serve it
+/// through LoadFile2. uefi.prepare takes it out of the page pool. On failure
+/// the kernel boots without an initrd.
+fn loadInitrd(filesystem: fs.Fs, path: []const u8, kernel: pe.Loaded) void {
+    // A kernel in the first image window of the large layout ends below the
+    // ACPI pool, so the initrd starts at the page pool.
+    const after = std.mem.alignForward(usize, kernel.base + kernel.size, two_mib);
+    const base = @max(after, mem.page_pool_base orelse 0);
+    const room = if (base < mem.ram_end_default) mem.ram_end_default - base else 0;
+    const dst = @as([*]u8, @ptrFromInt(base))[0..room];
+    const n = filesystem.readFile(path, dst) orelse {
+        if (fat.fileSize(path)) |size| {
+            if (size <= room) {
+                console.err.print("[boot] extlinux: the read of initrd {s} failed, booting without it\n", .{path}) catch {};
+            } else console.err.print(
+                "[boot] extlinux: initrd {s} is {d} bytes, {d} bytes of RAM are free after the kernel, booting without it\n",
+                .{ path, size, room },
+            ) catch {};
+        } else {
+            console.err.print("[boot] extlinux: initrd {s} not found, booting without it\n", .{path}) catch {};
+        }
+        return;
+    };
+    console.out.print("[boot] extlinux: initrd {s}, {d} bytes\n", .{ path, n }) catch {};
+    tpm.measure(tpm.PCR_BOOT_LOADER, dst[0..n], "initrd");
+    initrd.install(dst[0..n]);
 }
 
 /// Resolve a file path from the BootOrder / Boot#### EFI variables. Returns null

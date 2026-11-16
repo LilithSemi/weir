@@ -68,6 +68,13 @@ var riscv_boot: RiscvBootProtocol = undefined; // zippy:ignore unsafe_undefined
 var boot_hartid: usize = 0;
 var dtb_addr: usize = 0;
 var cmdline = std.unicode.utf8ToUtf16LeStringLiteral("earlycon=sbi console=ttyS0 keep_bootcon").*;
+var load_options: ?[:0]u16 = &cmdline;
+
+/// Set the load options of the first image. Null gives none. The buffer must
+/// stay valid while the image runs.
+pub fn setLoadOptions(options: ?[:0]u16) void {
+    load_options = options;
+}
 
 // Device tree handed to the OS via the EFI configuration table.
 const DEVICE_TREE_GUID = uefi.Guid{
@@ -1246,6 +1253,14 @@ pub fn prepare(dtb: usize, hartid: usize, image_base: usize, image_size: usize) 
     // boot services data: the OS can reclaim it once the stub has copied it.
     pages = .init(page_pool_base, RAM_END);
     pool = .init(&pages);
+    // A kernel too large for the first image window loads in the pool. The
+    // memory map then reports it through the pool walk.
+    if (poolPart(first_image.start, first_image.end)) |p| {
+        if (!pages.allocAt(p.start, p.end - p.start, image_tag)) {
+            console.err.print("[uefi] the first image at {x} overlaps used pool memory, halting\n", .{image_base}) catch {};
+            cpu.halt();
+        }
+    }
     if (initrd.region()) |r| {
         const s = r.base & ~@as(usize, 4095);
         const e = std.mem.alignForward(usize, r.base + r.len, 4096);
@@ -1368,8 +1383,8 @@ pub fn prepare(dtb: usize, hartid: usize, image_base: usize, image_size: usize) 
         .device_handle = imageHandle(),
         .file_path = &end_path,
         .reserved = @ptrCast(&image_marker),
-        .load_options_size = @intCast((cmdline.len + 1) * 2),
-        .load_options = @ptrCast(&cmdline),
+        .load_options_size = if (load_options) |o| @intCast((o.len + 1) * 2) else 0,
+        .load_options = if (load_options) |o| @ptrCast(o.ptr) else null,
         .image_base = @ptrFromInt(image_base),
         .image_size = image_size,
         .image_code_type = .loader_code,

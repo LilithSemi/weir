@@ -525,8 +525,11 @@ pub fn handoff(hartid: usize, dtb: usize) Handoff {
         console.out.writeAll(
             "[boot] boot manager: searching the ESP for a bootable EFI app\n",
         ) catch {};
+        // Copy the tree first. The boot manager reads files into RAM where an
+        // earlier stage could have left it.
+        const dtb_stable = stableDtb(dtb_eff);
         if (manager.loadBootImage()) |loaded| {
-            const table = uefi.prepare(stableDtb(dtb_eff), hartid, loaded.base, loaded.size);
+            const table = uefi.prepare(dtb_stable, hartid, loaded.base, loaded.size);
             console.out.print(
                 "[uefi] PE entry @ {x} (base {x}, {d} bytes), system table @ {x}\n",
                 .{ loaded.entry, loaded.base, loaded.size, table },
