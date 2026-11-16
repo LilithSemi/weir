@@ -216,6 +216,7 @@ pub fn build(b: *std.Build) void {
         "src/acpi/tables.zig",
         "src/smbios/structs.zig",
         "src/smbios/table.zig",
+        "src/var/log.zig",
     };
     for (pure_tests) |path| {
         const t = b.addTest(.{
