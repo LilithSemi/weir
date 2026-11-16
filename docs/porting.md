@@ -37,6 +37,20 @@ A device is optional. When the tree has no node for a class, Weir uses a default
 or turns the feature off. The console UART, the CLINT, and the memory node are
 the minimum a board needs.
 
+## Variable store
+
+The EFI variable store needs flash that Weir can write. The board supplies one of
+these:
+
+- SPI flash: a `jedec,spi-nor` node with `reg-names = "xip", "ctrl"` for the
+  Harbor write port, and a `river-vars` partition of at least 32 KiB. The
+  partition offset and size are multiples of 8 KiB.
+- CFI flash: a `cfi-flash` node with a second bank, as on QEMU `virt`.
+
+With neither, the variable services have no store. See
+[device-tree.md](device-tree.md) for the rules and an example, and
+[uefi.md](uefi.md) for the store.
+
 ## The linker script follows the tree
 
 The host tool `tools/fdt2ld.zig` reads the same tree and generates the linker

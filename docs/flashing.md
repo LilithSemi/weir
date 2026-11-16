@@ -63,15 +63,22 @@ own instead (see above). This keeps offset 0 safe.
 
 ### From Linux on the board
 
-If you run Linux on the board with that device tree, you do not need the raw
-offsets. The SPI-NOR flash appears as an MTD device under `/dev/mtd`, and the
-`fixed-partitions` labels name each partition, so the kernel exposes a per-label
-path. Write to the labeled partition with `dd`:
+The `jedec,spi-nor` node does not give Linux an MTD device. Weir expects a
+Linux kernel module for the `harbor,spi-flash-port` node to expose the flash as
+MTD. That module is not part of this repo.
 
-```
-dd if=weir-fsbl.bin            of=/dev/disk/by-label/river-fsbl
-dd if=weir-firmware-packed.bin of=/dev/disk/by-label/river-firmware
-```
+Weir and Linux share one port. A claim register lets one of them run an
+operation at a time. The hardware does not enforce the claim, so both sides must
+use it.
 
-The exact path depends on the kernel. Use whatever name the `fixed-partitions`
-labels produce. See [device-tree.md](device-tree.md) for the partition labels.
+Weir expects these limits on the Linux side:
+
+- Linux treats `river-vars` as read-only. The device tree marks it `read-only`.
+  The hardware does not stop a write there, and `FlashLock` never covers
+  `river-vars`.
+- A partition whose bit is set in `FlashLock` cannot be erased or programmed by
+  any CPU access until the next reset. See [uefi.md](uefi.md#flashlock).
+
+MTD partitions are listed in `/proc/mtd`, and a partition needs an erase before
+a write. `flashcp` is the usual tool. The `fixed-partitions` labels name the
+partitions. See [device-tree.md](device-tree.md) for the partition labels.

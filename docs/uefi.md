@@ -27,10 +27,58 @@ Weir implements the memory, protocol, and hand-off calls a loader needs:
 
 - `ResetSystem` and `SetVirtualAddressMap`.
 - `GetVariable`, `SetVariable`, `GetNextVariableName`, and `QueryVariableInfo`.
-  A CFI NOR flash backs the variable store when the board has one
-  (`src/uefi/varstore.zig`).
+  A flash store keeps the variables with the non-volatile attribute. See
+  [Variable store](#variable-store).
 - `GetTime` and `SetTime`. Time comes from an RTC when the board has one, else
   from a software clock that starts at the UNIX epoch (`src/time.zig`).
+
+## Variable store
+
+`src/var/store.zig` backs the variable services. Weir picks the backend at build
+time from the device tree:
+
+- SPI: the tree has a `jedec,spi-nor` node with a `ctrl` register block and a
+  `river-vars` partition. The store lives in that partition.
+- CFI: the tree has a `cfi-flash` node with a second bank, as on QEMU `virt`. The
+  store lives in that bank.
+- None: the board has neither. A read gives `EFI_NOT_FOUND` and a write gives
+  `EFI_DEVICE_ERROR`.
+
+The store uses two banks on the flash. Each bank holds a header and an append
+log of records, and every record has a CRC. A write appends a record, and a
+delete appends a record with no data. When the active bank is full, Weir copies
+the live records to the other bank. It writes the valid mark of the new bank
+last, so a bank without the mark is not in use. At boot, Weir reads the valid
+bank with the highest sequence number. A power loss during an append can leave an incomplete record at the end of
+the log. Weir drops it, keeps the data before it, and prints
+`[var] recovered after an incomplete write`. A power loss during a compaction
+leaves the old bank active, and Weir prints nothing.
+
+| Item | Limit |
+| --- | --- |
+| Variable name | 255 characters |
+| Variable data | 32 KiB |
+| Flash capacity | Up to 128 KiB per bank, less a 16 byte header |
+| RAM for volatile variables | 16 KiB |
+
+A variable without `EFI_VARIABLE_NON_VOLATILE` stays in RAM and is gone at
+reset. A set with attributes of 0 or a data size of 0 deletes the variable.
+
+The variable services work before `ExitBootServices`. Runtime access to
+variables is not available yet.
+
+### FlashLock
+
+On an SPI board, the variable `FlashLock` locks flash partitions until the next
+reset. It uses the Weir vendor GUID `53ad00ad-b655-414a-a2ff-058c0db1659d`. It
+must have the non-volatile attribute and hold a 4 byte little-endian bit mask.
+
+Bit N locks partition N, counted in the order of the device tree. Weir ignores
+the bit of the `river-vars` partition, because it must keep writing its own
+store. It also ignores bits above the last partition. Weir reads the variable at
+boot, locks the partitions, and prints `[flash] locked partitions:` with their
+labels. The lock holds until reset, for Weir and for Linux.
+A new value of `FlashLock` takes effect at the next boot.
 
 ## Protocols
 

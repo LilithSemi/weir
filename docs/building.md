@@ -35,6 +35,7 @@ zig build -Ddtb=board.dtb
 | `-Dpe-app=PATH` | A PE32+ EFI application to embed and load. |
 | `-Ddisk-boot` | Read the boot PE off a disk, not an embedded blob. |
 | `-Dboot-manager` | Boot through the ESP boot manager (GPT, FAT, BootOrder). |
+| `-Dvar-selftest` | Test the EFI variable store at each boot. See [testing.md](testing.md). |
 | `-Dinitrd=PATH` | An initramfs to serve the kernel through LoadFile2. |
 | `-Dboard-info=PATH` | Board identity (zon) for the SMBIOS tables. See [smbios.md](smbios.md). |
 | `-Dbios-date=DATE` | SMBIOS BIOS release date, as MM/DD/YYYY. |
