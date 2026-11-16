@@ -292,8 +292,8 @@ test "a header takes its type and length from the structure" {
 }
 
 test "memory types carry their SMBIOS type 17 codes" {
-    try std.testing.expectEqual(@as(u8, 0x18), @intFromEnum(MemoryType.ddr3));
-    try std.testing.expectEqual(@as(u8, 0x1e), @intFromEnum(MemoryType.lpddr4));
-    try std.testing.expectEqual(@as(u8, 0x22), @intFromEnum(MemoryType.ddr5));
-    try std.testing.expectEqual(@as(u8, 0x23), @intFromEnum(MemoryType.lpddr5));
+    try std.testing.expectEqual(@as(u8, 0x18), @backingInt(MemoryType.ddr3));
+    try std.testing.expectEqual(@as(u8, 0x1e), @backingInt(MemoryType.lpddr4));
+    try std.testing.expectEqual(@as(u8, 0x22), @backingInt(MemoryType.ddr5));
+    try std.testing.expectEqual(@as(u8, 0x23), @backingInt(MemoryType.lpddr5));
 }
