@@ -3,13 +3,13 @@
 
 const rt_abi = @import("../var/rt_abi.zig");
 const store = @import("../var/store.zig");
+const rt = @import("../uefi/rt.zig");
 const sbi = @import("sbi.zig");
 
-var block: rt_abi.Request align(8) = undefined;
 var busy: u8 = 0;
 
 fn blockAddress() usize {
-    return @intFromPtr(&block);
+    return @intFromPtr(&rt.block);
 }
 
 pub fn supported() bool {
@@ -23,6 +23,6 @@ pub fn call(addr: usize) sbi.Ret {
         return .{ .err = sbi.SBI_ERR_DENIED };
     }
     defer @atomicStore(u8, &busy, 0, .release);
-    rt_abi.execute(store, &block);
+    rt_abi.execute(store, &rt.block);
     return .{};
 }

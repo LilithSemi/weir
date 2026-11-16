@@ -89,6 +89,17 @@ const main_template =
     \\    . = ALIGN(8);
     \\    __rodata_end = .;
     \\    .data : {{ PROVIDE(__global_pointer$ = . + 0x800); *(.data .data.* .sdata .sdata.*) }}
+    \\    /* The EFI runtime region. The OS maps these whole pages. Its data starts
+    \\     * at least 4 KiB above gp, so no access to it can be gp relative. */
+    \\    . = ALIGN(0x1000);
+    \\    .rt_text : {{
+    \\        __rt_text_start = .; KEEP(*(.rt_text .rt_text.*))
+    \\        . = ALIGN(MAX(., __global_pointer$ + 0x1000), 0x1000); __rt_text_end = .;
+    \\    }}
+    \\    .rt_data (NOLOAD) : {{
+    \\        __rt_data_start = .; *(.rt_data .rt_data.*)
+    \\        . = ALIGN(0x1000); __rt_data_end = .;
+    \\    }}
     \\    . = ALIGN(8);
     \\    .bss (NOLOAD) : {{
     \\        __bss_start = .; *(.bss .bss.* .sbss .sbss.* COMMON)

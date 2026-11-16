@@ -65,6 +65,14 @@ pub fn nameUnits(name: *const [max_name_units]u16, name_size: u64) ?usize {
     return null;
 }
 
+/// Checks the name like `nameUnits`, then writes the terminator again at the
+/// checked position. A write from another hart after the check cannot remove it.
+pub fn terminateName(name: *[max_name_units]u16, name_size: u64) ?usize {
+    const units = nameUnits(name, name_size) orelse return null;
+    name[units - 1] = 0;
+    return units;
+}
+
 /// The size of data that the block carries, or null when `data_size` is too large.
 pub fn dataLen(data_size: u64) ?usize {
     if (data_size > max_data_len) return null;
@@ -97,7 +105,7 @@ pub fn execute(comptime S: type, req: *Request) void {
 fn get(comptime S: type, req: *Request) Result {
     const name_size = once(u64, &req.name_size);
     const data_size = once(u64, &req.data_size);
-    _ = nameUnits(&req.name, name_size) orelse return .invalid;
+    _ = terminateName(&req.name, name_size) orelse return .invalid;
     var size: usize = @intCast(@min(data_size, max_data_len));
     var attributes: u32 = 0;
     const result = S.get(namePtr(req), &req.guid, &attributes, &size, &req.data);
@@ -116,7 +124,7 @@ fn set(comptime S: type, req: *Request) Result {
     const name_size = once(u64, &req.name_size);
     const data_size = once(u64, &req.data_size);
     const attributes = once(u32, &req.attributes);
-    _ = nameUnits(&req.name, name_size) orelse return .invalid;
+    _ = terminateName(&req.name, name_size) orelse return .invalid;
     const len = dataLen(data_size) orelse return .invalid;
     return S.set(namePtr(req), &req.guid, attributes, len, &req.data);
 }
@@ -435,4 +443,26 @@ test "seal calls the store seal and succeeds" {
     execute(Fake, req);
     try testing.expectEqual(@backingInt(Result.success), req.status);
     try testing.expect(Fake.sealed);
+}
+
+test "terminateName gives the units and keeps the terminator at the checked position" {
+    var name: [max_name_units]u16 = @splat('x');
+    name[0] = 'A';
+    name[1] = 'b';
+    name[2] = 0;
+    try testing.expectEqual(@as(?usize, 3), terminateName(&name, 512));
+    try testing.expectEqual(@as(u16, 0), name[2]);
+    try testing.expectEqual(@as(u16, 'x'), name[3]);
+}
+
+test "terminateName changes nothing when the name has no terminator in name_size" {
+    var name: [max_name_units]u16 = @splat('x');
+    name[3] = 0;
+    try testing.expectEqual(@as(?usize, null), terminateName(&name, 6));
+    const expected: [max_name_units]u16 = blk: {
+        var e: [max_name_units]u16 = @splat('x');
+        e[3] = 0;
+        break :blk e;
+    };
+    try testing.expectEqualSlices(u16, &expected, &name);
 }

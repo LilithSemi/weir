@@ -12,6 +12,7 @@ const console = @import("../console/console.zig");
 const clint = @import("../arch/riscv/clint.zig");
 const cpu = @import("../arch/riscv/cpu.zig");
 const var_store = @import("../var/store.zig");
+const rt = @import("rt.zig");
 const handledb = @import("handledb.zig");
 const blockio = @import("blockio.zig");
 const initrd = @import("initrd.zig");
@@ -48,7 +49,6 @@ const PAGE_POOL_BASE = mem.page_pool_base;
 // read them, so an undefined start is safe. Zero-init would only add cost.
 var system_table: tables.SystemTable = undefined; // zippy:ignore unsafe_undefined
 var boot_services: tables.BootServices = undefined; // zippy:ignore unsafe_undefined
-var runtime_services: tables.RuntimeServices = undefined; // zippy:ignore unsafe_undefined
 var con_out: uefi.protocol.SimpleTextOutput = undefined; // zippy:ignore unsafe_undefined
 var con_out_mode: uefi.protocol.SimpleTextOutput.Mode = undefined; // zippy:ignore unsafe_undefined
 var con_in: uefi.protocol.SimpleTextInput = undefined; // zippy:ignore unsafe_undefined
@@ -88,8 +88,9 @@ const RISCV_BOOT_GUID = uefi.Guid{
 };
 
 // EFI_RT_PROPERTIES_TABLE: tells the OS which runtime services work after
-// ExitBootServices. We relocate nothing into the OS address space, so we
-// advertise zero supported, and the kernel never calls one (no efi=noruntime).
+// ExitBootServices. Only the variable services work, and only with a store.
+// SetVirtualAddressMap is not in the list, so the OS keeps the runtime region
+// at its physical address.
 const RT_PROPERTIES_GUID = uefi.Guid{
     .time_low = 0xeb66918a,
     .time_mid = 0x7eef,
@@ -597,6 +598,15 @@ fn freePages(memory: usize, pages: usize) callconv(.c) usize {
 // M-mode after the OS starts, so the OS must reserve this region.
 const FW_RESERVED_END = mem.fw_reserved_end;
 
+/// The runtime region, when it lies in order inside the firmware reserved
+/// window. Else the memory map reports the window as one reserved region.
+fn runtimeRegion() ?rt.Bounds {
+    const r = rt.bounds();
+    const in_place = RAM_BASE <= r.text_start and r.text_start <= r.text_end and
+        r.text_end == r.data_start and r.data_start <= r.data_end and r.data_end <= FW_RESERVED_END;
+    return if (in_place) r else null;
+}
+
 fn getMemoryMap(
     mmap_size: *usize,
     mmap: ?[*]u8,
@@ -624,11 +634,15 @@ fn getMemoryMap(
         break :blk null;
     };
 
-    // base: firmware-reserved + boot-services-data. Plus ACPI reclaim if linked,
-    // plus the free region(s): one normally, three when the initrd splits them.
+    // base: firmware-reserved, split in four by the runtime code and data when
+    // the region is in place, then boot-services-data. Plus ACPI reclaim if
+    // linked, plus the free region(s): one normally, three when the initrd
+    // splits them.
+    const region = runtimeRegion();
+    const firmware_descs: usize = if (region != null) 4 else 1;
     const acpi_descs: usize = if (have_acpi) 1 else 0;
     const free_descs: usize = if (ir != null) 3 else 1;
-    const count: usize = 2 + acpi_descs + free_descs;
+    const count: usize = firmware_descs + 1 + acpi_descs + free_descs;
     const needed = count * dsize;
     desc_size.* = dsize;
     desc_ver.* = 1;
@@ -659,9 +673,22 @@ fn getMemoryMap(
         }
     }.d;
 
-    // The running firmware: reserved so the OS never reclaims it.
-    emit(&descs[next], .reserved_memory_type, RAM_BASE, FW_RESERVED_END, attr);
-    next += 1;
+    // The running firmware: reserved so the OS never reclaims it. The OS maps
+    // the runtime code and data (EFI_MEMORY_RUNTIME) to call the variable services.
+    if (region) |r| {
+        const runtime: tables.MemoryDescriptorAttribute = @bitCast(@as(u64, 0x8 | 1 << 63));
+        emit(&descs[next], .reserved_memory_type, RAM_BASE, r.text_start, attr);
+        next += 1;
+        emit(&descs[next], .runtime_services_code, r.text_start, r.text_end, runtime);
+        next += 1;
+        emit(&descs[next], .runtime_services_data, r.data_start, r.data_end, runtime);
+        next += 1;
+        emit(&descs[next], .reserved_memory_type, r.data_end, FW_RESERVED_END, attr);
+        next += 1;
+    } else {
+        emit(&descs[next], .reserved_memory_type, RAM_BASE, FW_RESERVED_END, attr);
+        next += 1;
+    }
     // The loaded image and low boot allocations, up to the ACPI pool if present.
     const bsd_end = if (have_acpi) acpi_qemu.POOL_BASE else PAGE_POOL_BASE;
     emit(&descs[next], .boot_services_data, FW_RESERVED_END, bsd_end, attr);
@@ -733,7 +760,16 @@ fn exitBootServices(image: uefi.Handle, map_key: usize) callconv(.c) usize {
     tr("exitBootServices");
     _ = image;
     _ = map_key;
-    // The application takes over the machine. Nothing to tear down here.
+    // The application takes over the machine. Only the variable services stay.
+    // A second call does the same work again, so a retry is safe.
+    rt.seal();
+    const info = @typeInfo(tables.RuntimeServices).@"struct";
+    inline for (info.field_names, info.field_types) |name, field_type| {
+        if (comptime @typeInfo(field_type) == .pointer and !rt.keepsAtRuntime(name)) {
+            @field(rt.table, name) = @ptrFromInt(@intFromPtr(&rt.unsupported));
+        }
+    }
+    fixCrc(tables.RuntimeServices, &rt.table.hdr, &rt.table);
     return ok;
 }
 
@@ -1087,69 +1123,6 @@ fn closeEvent(event: ?*anyopaque) callconv(.c) usize {
 
 // --- Runtime Services -------------------------------------------------------
 
-fn setVirtualAddressMap(
-    mmap_size: usize,
-    desc_size: usize,
-    desc_ver: u32,
-    virtual_map: ?*anyopaque,
-) callconv(.c) usize {
-    _ = mmap_size;
-    _ = desc_size;
-    _ = desc_ver;
-    _ = virtual_map;
-    // We keep runtime services identity-mapped, so this is a no-op success.
-    return ok;
-}
-
-// --- EFI variable runtime services (flash-backed) ---------------------------
-
-fn statusOf(r: var_store.Result) usize {
-    return @backingInt(switch (r) {
-        .success => Status.success,
-        .not_found => Status.not_found,
-        .buffer_too_small => Status.buffer_too_small,
-        .invalid => Status.invalid_parameter,
-        .out_of_resources => Status.out_of_resources,
-        .device_error => Status.device_error,
-    });
-}
-
-fn getVariable(
-    name: [*:0]const u16,
-    guid: *const [16]u8,
-    attrs: ?*u32,
-    data_size: *usize,
-    data: ?[*]u8,
-) callconv(.c) usize {
-    return statusOf(var_store.get(name, guid, attrs, data_size, data));
-}
-
-fn setVariable(
-    name: [*:0]const u16,
-    guid: *const [16]u8,
-    attributes: u32,
-    data_size: usize,
-    data: ?[*]const u8,
-) callconv(.c) usize {
-    return statusOf(var_store.set(name, guid, attributes, data_size, data));
-}
-
-fn getNextVariableName(name_size: *usize, name: [*:0]u16, guid: *[16]u8) callconv(.c) usize {
-    return statusOf(var_store.next(name_size, name, guid));
-}
-
-fn queryVariableInfo(
-    attributes: u32,
-    max_storage: *u64,
-    remaining: *u64,
-    max_var: *u64,
-) callconv(.c) usize {
-    _ = attributes;
-    if (!var_store.available()) return @backingInt(Status.unsupported);
-    var_store.queryInfo(max_storage, remaining, max_var);
-    return ok;
-}
-
 fn getTime(t: *uefi.Time, caps: ?*uefi.TimeCapabilities) callconv(.c) usize {
     const dt = time.now();
     t.* = .{
@@ -1312,25 +1285,24 @@ pub fn prepare(dtb: usize, hartid: usize, image_base: usize, image_size: usize) 
     fixCrc(tables.BootServices, &boot_services.hdr, &boot_services);
 
     // Runtime Services: stub everything, then a working ResetSystem.
-    stubAll(tables.RuntimeServices, &runtime_services);
-    install(&runtime_services, .{
+    stubAll(tables.RuntimeServices, &rt.table);
+    install(&rt.table, .{
         ._resetSystem = &resetSystem,
-        ._setVirtualAddressMap = &setVirtualAddressMap,
-        ._getVariable = &getVariable,
-        ._setVariable = &setVariable,
-        ._getNextVariableName = &getNextVariableName,
-        ._queryVariableInfo = &queryVariableInfo,
+        ._getVariable = &rt.getVariable,
+        ._setVariable = &rt.setVariable,
+        ._getNextVariableName = &rt.getNextVariableName,
+        ._queryVariableInfo = &rt.queryVariableInfo,
         ._getTime = &getTime,
         ._setTime = &setTime,
     });
-    runtime_services.hdr = .{
+    rt.table.hdr = .{
         .signature = tables.RuntimeServices.signature,
         .revision = tables.SystemTable.revision_2_70,
         .header_size = @sizeOf(tables.RuntimeServices),
         .crc32 = 0,
         .reserved = 0,
     };
-    fixCrc(tables.RuntimeServices, &runtime_services.hdr, &runtime_services);
+    fixCrc(tables.RuntimeServices, &rt.table.hdr, &rt.table);
 
     // RISC-V boot protocol (boot hartid) for the kernel stub.
     riscv_boot = .{
@@ -1368,8 +1340,10 @@ pub fn prepare(dtb: usize, hartid: usize, image_base: usize, image_size: usize) 
         config_count += 1;
     }
 
-    // Advertise our (empty) runtime-services support so the OS does not call
-    // services we never relocate into its address space (see RT_PROPERTIES_GUID).
+    // Tell the OS which runtime services it can call (see RT_PROPERTIES_GUID).
+    // 0x2070 is GetVariable, GetNextVariableName, SetVariable and QueryVariableInfo.
+    // The mask is 0 when there is no store or the runtime region is not in place.
+    rt_properties.runtime_services_supported = if (var_store.available() and runtimeRegion() != null) 0x2070 else 0;
     config_table[config_count] = .{
         .vendor_guid = RT_PROPERTIES_GUID,
         .vendor_table = @ptrCast(&rt_properties),
@@ -1413,7 +1387,7 @@ pub fn prepare(dtb: usize, hartid: usize, image_base: usize, image_size: usize) 
         .con_out = &con_out,
         .standard_error_handle = imageHandle(),
         .std_err = &con_out,
-        .runtime_services = &runtime_services,
+        .runtime_services = &rt.table,
         .boot_services = &boot_services,
         .number_of_table_entries = config_count,
         .configuration_table = &config_table,

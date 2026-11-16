@@ -188,8 +188,22 @@ pub fn build(b: *std.Build) void {
     const install_elf = b.addInstallBinFile(exe.getEmittedBin(), "weir-firmware.elf");
     b.getInstallStep().dependOn(&install_elf.step);
 
+    // The OS calls the EFI runtime region with only that region mapped. This
+    // check fails the build when its code reaches outside the region.
+    const rt_checker = b.addExecutable(.{
+        .name = "rtcheck",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/rtcheck.zig"),
+            .target = b.graph.host,
+            .optimize = .ReleaseSafe,
+        }),
+    });
+    const rt_check = b.addRunArtifact(rt_checker);
+    rt_check.addFileArg(exe.getEmittedBin());
+
     // Flat image for `-bios`.
     const bin = exe.addObjCopy(.{ .format = .binary });
+    bin.step.dependOn(&rt_check.step);
     const install_bin = b.addInstallBinFile(bin.getOutput(), "weir-firmware.bin");
     b.getInstallStep().dependOn(&install_bin.step);
 

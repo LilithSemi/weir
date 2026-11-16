@@ -12,6 +12,7 @@ const gpt = @import("../block/gpt.zig");
 const fat = @import("../fs/fat.zig");
 const pe = @import("../loader/pe.zig");
 const var_store = @import("../var/store.zig");
+const rt = @import("../uefi/rt.zig");
 const initrd = @import("../uefi/initrd.zig");
 const simplefs = @import("../uefi/simplefs.zig");
 const blockio = @import("../uefi/blockio.zig");
@@ -125,7 +126,7 @@ fn bootEntryPath(out: []u8) ?[]const u8 {
 
     var order: [256]u8 = undefined;
     var order_size: usize = order.len;
-    if (var_store.get(uefiName("BootOrder"), &GLOBAL_GUID, null, &order_size, &order) != .success)
+    if (rt.getVariable(uefiName("BootOrder"), &GLOBAL_GUID, null, &order_size, &order) != 0)
         return null;
 
     var i: usize = 0;
@@ -135,7 +136,7 @@ fn bootEntryPath(out: []u8) ?[]const u8 {
         const var_name = bootVarName(num, &name_buf);
         var opt: [1024]u8 = undefined;
         var opt_size: usize = opt.len;
-        if (var_store.get(var_name, &GLOBAL_GUID, null, &opt_size, &opt) != .success) continue;
+        if (rt.getVariable(var_name, &GLOBAL_GUID, null, &opt_size, &opt) != 0) continue;
         if (loadOptionPath(opt[0..opt_size], out)) |p| {
             console.out.print("[boot] Boot{x:0>4} selected\n", .{num}) catch {};
             return p;
