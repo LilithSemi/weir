@@ -13,7 +13,7 @@ const elf = @import("loader/elf.zig");
 const pe = @import("loader/pe.zig");
 const storage = @import("block/storage.zig");
 const conduit = @import("conduit");
-const varstore = @import("uefi/varstore.zig");
+const var_store = @import("var/store.zig");
 const time = @import("time.zig");
 const manager = @import("boot/manager.zig");
 const uefi = @import("uefi/uefi.zig");
@@ -82,8 +82,8 @@ pub fn boot(hartid: usize, dtb: usize) void {
         console.out.writeAll("[acpi] no AML and no device tree. The OS uses the published device tree.\n") catch {};
     }
 
-    // Non-volatile EFI variable store, backed by CFI NOR flash if present.
-    varstore.init();
+    // The EFI variable store, on the SPI flash or the QEMU CFI flash when the device tree has one.
+    var_store.init();
 
     // Wall-clock time for the UEFI runtime services. Binds an RTC if present,
     // else starts a software clock at the UNIX epoch.

@@ -108,6 +108,8 @@ pub fn build(b: *std.Build) void {
     // the \EFI\BOOT\BOOTRISCV64.EFI fallback), and boot the referenced EFI app.
     const boot_manager = b.option(bool, "boot-manager", "Boot via the ESP boot manager (GPT + FAT + BootOrder)") orelse disk_boot;
 
+    const var_selftest = b.option(bool, "var-selftest", "Test the EFI variable store at each boot") orelse false;
+
     // An initramfs to hand the Linux kernel via the LoadFile2 protocol, so it
     // reaches a real userspace instead of panicking for lack of a root fs.
     const initrd_path = b.option(std.Build.LazyPath, "initrd", "Path to an initramfs (cpio.gz) to embed and serve via LoadFile2");
@@ -128,6 +130,7 @@ pub fn build(b: *std.Build) void {
     options.addOption(std.SemanticVersion, "version", weir_version);
     options.addOption(bool, "has_board_info", board_info_path != null);
     options.addOption([]const u8, "bios_date", bios_date);
+    options.addOption(bool, "var_selftest", var_selftest);
 
     const mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -214,9 +217,11 @@ pub fn build(b: *std.Build) void {
     const pure_tests = [_][]const u8{
         "src/acpi/madt.zig",
         "src/acpi/tables.zig",
+        "src/flash/cfi.zig",
         "src/flash/spi_nor.zig",
         "src/smbios/structs.zig",
         "src/smbios/table.zig",
+        "src/var/efi.zig",
         "src/var/log.zig",
     };
     for (pure_tests) |path| {

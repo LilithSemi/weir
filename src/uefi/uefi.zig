@@ -11,7 +11,7 @@ const uefi = std.os.uefi;
 const console = @import("../console/console.zig");
 const clint = @import("../arch/riscv/clint.zig");
 const cpu = @import("../arch/riscv/cpu.zig");
-const varstore = @import("varstore.zig");
+const var_store = @import("../var/store.zig");
 const handledb = @import("handledb.zig");
 const blockio = @import("blockio.zig");
 const initrd = @import("initrd.zig");
@@ -1103,7 +1103,7 @@ fn setVirtualAddressMap(
 
 // --- EFI variable runtime services (flash-backed) ---------------------------
 
-fn statusOf(r: varstore.Result) usize {
+fn statusOf(r: var_store.Result) usize {
     return @backingInt(switch (r) {
         .success => Status.success,
         .not_found => Status.not_found,
@@ -1121,7 +1121,7 @@ fn getVariable(
     data_size: *usize,
     data: ?[*]u8,
 ) callconv(.c) usize {
-    return statusOf(varstore.get(name, guid, attrs, data_size, data));
+    return statusOf(var_store.get(name, guid, attrs, data_size, data));
 }
 
 fn setVariable(
@@ -1131,11 +1131,11 @@ fn setVariable(
     data_size: usize,
     data: ?[*]const u8,
 ) callconv(.c) usize {
-    return statusOf(varstore.set(name, guid, attributes, data_size, data));
+    return statusOf(var_store.set(name, guid, attributes, data_size, data));
 }
 
 fn getNextVariableName(name_size: *usize, name: [*:0]u16, guid: *[16]u8) callconv(.c) usize {
-    return statusOf(varstore.next(name_size, name, guid));
+    return statusOf(var_store.next(name_size, name, guid));
 }
 
 fn queryVariableInfo(
@@ -1145,8 +1145,8 @@ fn queryVariableInfo(
     max_var: *u64,
 ) callconv(.c) usize {
     _ = attributes;
-    if (!varstore.available()) return @backingInt(Status.unsupported);
-    varstore.queryInfo(max_storage, remaining, max_var);
+    if (!var_store.available()) return @backingInt(Status.unsupported);
+    var_store.queryInfo(max_storage, remaining, max_var);
     return ok;
 }
 

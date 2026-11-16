@@ -11,7 +11,7 @@ const block = @import("../block/block.zig");
 const gpt = @import("../block/gpt.zig");
 const fat = @import("../fs/fat.zig");
 const pe = @import("../loader/pe.zig");
-const varstore = @import("../uefi/varstore.zig");
+const var_store = @import("../var/store.zig");
 const initrd = @import("../uefi/initrd.zig");
 const simplefs = @import("../uefi/simplefs.zig");
 const blockio = @import("../uefi/blockio.zig");
@@ -121,11 +121,11 @@ fn tryDevice(sd: storage.Device, i: usize, buf: []u8) ?pe.Loaded {
 /// Resolve a file path from the BootOrder / Boot#### EFI variables. Returns null
 /// to fall back to the removable-media path.
 fn bootEntryPath(out: []u8) ?[]const u8 {
-    if (!varstore.available()) return null;
+    if (!var_store.available()) return null;
 
     var order: [256]u8 = undefined;
     var order_size: usize = order.len;
-    if (varstore.get(uefiName("BootOrder"), &GLOBAL_GUID, null, &order_size, &order) != .success)
+    if (var_store.get(uefiName("BootOrder"), &GLOBAL_GUID, null, &order_size, &order) != .success)
         return null;
 
     var i: usize = 0;
@@ -135,7 +135,7 @@ fn bootEntryPath(out: []u8) ?[]const u8 {
         const var_name = bootVarName(num, &name_buf);
         var opt: [1024]u8 = undefined;
         var opt_size: usize = opt.len;
-        if (varstore.get(var_name, &GLOBAL_GUID, null, &opt_size, &opt) != .success) continue;
+        if (var_store.get(var_name, &GLOBAL_GUID, null, &opt_size, &opt) != .success) continue;
         if (loadOptionPath(opt[0..opt_size], out)) |p| {
             console.out.print("[boot] Boot{x:0>4} selected\n", .{num}) catch {};
             return p;

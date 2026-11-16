@@ -318,18 +318,17 @@ pub fn Store(comptime Flash: type, comptime geo: Geometry) type {
         /// The log has a torn or bad tail that a compaction must remove.
         needs_compaction: bool,
 
-        pub fn init(flash: *Flash) Self {
-            return .{
-                .flash = flash,
-                .mirror = @splat(0xff),
-                .scratch = @splat(0xff),
-                .ram = @splat(0xff),
-                .ram_end = 0,
-                .active = 0,
-                .sequence = 0,
-                .end = bank_header_len,
-                .needs_compaction = false,
-            };
+        /// Sets up the store in place. A store in a global uses this, because the value is too large for a stack.
+        pub fn setup(self: *Self, flash: *Flash) void {
+            self.flash = flash;
+            @memset(&self.mirror, 0xff);
+            @memset(&self.scratch, 0xff);
+            @memset(&self.ram, 0xff);
+            self.ram_end = 0;
+            self.active = 0;
+            self.sequence = 0;
+            self.end = bank_header_len;
+            self.needs_compaction = false;
         }
 
         fn bankSequence(self: *Self, bank: u1) ?u32 {
@@ -346,7 +345,7 @@ pub fn Store(comptime Flash: type, comptime geo: Geometry) type {
 
         pub fn load(self: *Self) LoadResult {
             self.ram_end = 0;
-            self.mirror = @splat(0xff);
+            @memset(&self.mirror, 0xff);
             self.active = 0;
             self.sequence = 0;
             self.end = bank_header_len;
@@ -417,9 +416,11 @@ pub fn Store(comptime Flash: type, comptime geo: Geometry) type {
                 .{ self.nvLog(), self.ramLog() }
             else
                 .{ self.ramLog(), self.nvLog() };
+            // A variable keeps its attributes. A caller removes it first to change them.
             if (other.get(item.key()) != null) return error.InvalidParameter;
             if (here.get(item.key())) |live| {
-                if (live.attributes == attributes and std.mem.eql(u8, live.data, data)) return;
+                if (live.attributes != attributes) return error.InvalidParameter;
+                if (std.mem.eql(u8, live.data, data)) return;
             }
             if (non_volatile) return self.writeFlash(item);
             return self.writeRam(item);
@@ -480,7 +481,7 @@ pub fn Store(comptime Flash: type, comptime geo: Geometry) type {
                 .crc = bankCrc(sequence),
                 .valid = 0xffff_ffff,
             };
-            self.scratch = @splat(0xff);
+            @memset(&self.scratch, 0xff);
             @memcpy(self.scratch[0..bank_header_len], std.mem.asBytes(&header));
             var end = bank_header_len + self.nvLog().pack(self.scratch[bank_header_len..], skip);
             if (extra) |item| end += writeRecord(self.scratch[end..], item);
@@ -489,7 +490,7 @@ pub fn Store(comptime Flash: type, comptime geo: Geometry) type {
                 self.needs_compaction = true;
                 return error.DeviceError;
             }
-            self.mirror = self.scratch;
+            @memcpy(&self.mirror, &self.scratch);
             self.active = target;
             self.sequence = sequence;
             self.end = end;
@@ -637,11 +638,36 @@ test "header sizes are 16 and 32 bytes" {
 
 test "an erased flash loads as fresh and holds no variables" {
     var flash = TestFlash.init(1024);
-    var store = TestStore.init(&flash);
+    var store: TestStore = undefined;
+    store.setup(&flash);
     try testing.expectEqual(LoadResult.fresh, store.load());
     try testing.expect(!store.needs_compaction);
     try testing.expectEqual(@as(?Entry, null), store.get(wide("Boot0001"), &guid_a));
     try testing.expectEqual(@as(?Key, null), store.next(null));
+}
+
+test "setup on a used store clears it and the store then reads the flash" {
+    var flash = TestFlash.init(1024);
+    var other = TestFlash.init(1024);
+    var store: TestStore = undefined;
+    store.setup(&other);
+    _ = store.load();
+    try store.set(wide("A"), &guid_a, nv_attribute, "other");
+    try store.set(wide("V"), &guid_a, 0x6, "ram");
+
+    store.setup(&flash);
+    try testing.expectEqual(&flash, store.flash);
+    try testing.expect(allErased(&store.scratch));
+    try testing.expect(allErased(&store.ram));
+    try testing.expectEqual(@as(?Entry, null), store.get(wide("V"), &guid_a));
+    try testing.expectEqual(LoadResult.fresh, store.load());
+    try store.set(wide("A"), &guid_a, nv_attribute, "this");
+    try expectData(&store, wide("A"), &guid_a, "this");
+
+    var check: TestStore = undefined;
+    check.setup(&other);
+    _ = check.load();
+    try expectData(&check, wide("A"), &guid_a, "other");
 }
 
 test "a bank with three records loads and each value is readable" {
@@ -652,7 +678,8 @@ test "a bank with three records loads and each value is readable" {
     off = appendRecord(&flash, 0, off, wide("Timeout"), &guid_a, 0x3, &.{ 1, 2, 3, 4, 5 });
     off = appendRecord(&flash, 0, off, wide("Boot0001"), &guid_b, 0x1, "z");
 
-    var store = TestStore.init(&flash);
+    var store: TestStore = undefined;
+    store.setup(&flash);
     try testing.expectEqual(LoadResult.loaded, store.load());
     try testing.expect(!store.needs_compaction);
     try testing.expectEqual(@as(u32, 7), store.sequence);
@@ -680,7 +707,8 @@ test "a later record replaces an earlier one and a delete removes it" {
     off = appendRecord(&flash, 0, off, wide("A"), &guid_a, 4, "uno");
     off = appendRecord(&flash, 0, off, wide("B"), &guid_a, 0, "");
 
-    var store = TestStore.init(&flash);
+    var store: TestStore = undefined;
+    store.setup(&flash);
     try testing.expectEqual(LoadResult.loaded, store.load());
     try testing.expect(!store.needs_compaction);
 
@@ -702,7 +730,8 @@ test "next gives null when the previous key is not live" {
     writeBankHeader(&flash, 0, 1, valid_mark);
     _ = appendRecord(&flash, 0, bank_header_len, wide("A"), &guid_a, 1, "x");
 
-    var store = TestStore.init(&flash);
+    var store: TestStore = undefined;
+    store.setup(&flash);
     _ = store.load();
     const missing: Key = .{ .name = wide("Nope"), .guid = &guid_a };
     try testing.expectEqual(@as(?Key, null), store.next(missing));
@@ -717,7 +746,8 @@ test "the bank with the higher sequence is active" {
     writeBankHeader(&flash, 1, 6, valid_mark);
     _ = appendRecord(&flash, 1, bank_header_len, wide("V"), &guid_a, 1, "new");
 
-    var store = TestStore.init(&flash);
+    var store: TestStore = undefined;
+    store.setup(&flash);
     try testing.expectEqual(LoadResult.loaded, store.load());
     try testing.expectEqual(@as(u1, 1), store.active);
     try testing.expectEqual(@as(u32, 6), store.sequence);
@@ -731,7 +761,8 @@ test "a bank without the valid mark is ignored" {
     writeBankHeader(&flash, 1, 6, 0xffff_ffff);
     _ = appendRecord(&flash, 1, bank_header_len, wide("V"), &guid_a, 1, "new");
 
-    var store = TestStore.init(&flash);
+    var store: TestStore = undefined;
+    store.setup(&flash);
     try testing.expectEqual(LoadResult.loaded, store.load());
     try testing.expectEqual(@as(u1, 0), store.active);
     try testing.expectEqualStrings("old", store.get(wide("V"), &guid_a).?.data);
@@ -745,7 +776,8 @@ test "a bank with a bad header CRC is ignored" {
     _ = appendRecord(&flash, 1, bank_header_len, wide("V"), &guid_a, 1, "new");
     flash.data[test_geo.bank_offsets[1] + 4] ^= 0x01;
 
-    var store = TestStore.init(&flash);
+    var store: TestStore = undefined;
+    store.setup(&flash);
     try testing.expectEqual(LoadResult.loaded, store.load());
     try testing.expectEqual(@as(u1, 0), store.active);
     try testing.expectEqualStrings("old", store.get(wide("V"), &guid_a).?.data);
@@ -754,7 +786,8 @@ test "a bank with a bad header CRC is ignored" {
 test "a bank without the valid mark alone loads as fresh" {
     var flash = TestFlash.init(1024);
     writeBankHeader(&flash, 1, 2, 0xffff_ffff);
-    var store = TestStore.init(&flash);
+    var store: TestStore = undefined;
+    store.setup(&flash);
     try testing.expectEqual(LoadResult.fresh, store.load());
 }
 
@@ -768,7 +801,8 @@ test "a record with a bad CRC stops the replay and keeps the earlier records" {
     _ = appendRecord(&flash, 0, off, wide("C"), &guid_a, 1, "lost too");
     flash.data[bad_at + record_header_len + 4] ^= 0x10;
 
-    var store = TestStore.init(&flash);
+    var store: TestStore = undefined;
+    store.setup(&flash);
     try testing.expectEqual(LoadResult.recovered, store.load());
     try testing.expect(!store.needs_compaction);
     try testing.expectEqual(bad_at, store.end);
@@ -792,7 +826,8 @@ test "a record longer than the limits stops the replay" {
     header.crc = recordCrc(header, "", "");
     @memcpy(flash.data[off..][0..record_header_len], std.mem.asBytes(&header));
 
-    var store = TestStore.init(&flash);
+    var store: TestStore = undefined;
+    store.setup(&flash);
     try testing.expectEqual(LoadResult.recovered, store.load());
     try testing.expect(!store.needs_compaction);
     try testing.expectEqual(off, store.end);
@@ -814,7 +849,8 @@ test "a name longer than the limit stops the replay" {
     header.crc = recordCrc(header, "", "");
     @memcpy(flash.data[off..][0..record_header_len], std.mem.asBytes(&header));
 
-    var store = TestStore.init(&flash);
+    var store: TestStore = undefined;
+    store.setup(&flash);
     try testing.expectEqual(LoadResult.recovered, store.load());
     try testing.expect(!store.needs_compaction);
     try testing.expectEqual(off, store.end);
@@ -836,7 +872,8 @@ test "a record that runs past the end of the bank stops the replay" {
     };
     @memcpy(flash.data[off..][0..record_header_len], std.mem.asBytes(&header));
 
-    var store = TestStore.init(&flash);
+    var store: TestStore = undefined;
+    store.setup(&flash);
     try testing.expectEqual(LoadResult.recovered, store.load());
     try testing.expect(!store.needs_compaction);
     try testing.expectEqual(off, store.end);
@@ -850,7 +887,8 @@ test "a name without a terminator stops the replay" {
     const unterminated = wide("AB")[0..2];
     _ = appendRecord(&flash, 0, off, unterminated, &guid_a, 1, "bad");
 
-    var store = TestStore.init(&flash);
+    var store: TestStore = undefined;
+    store.setup(&flash);
     try testing.expectEqual(LoadResult.recovered, store.load());
     try testing.expect(!store.needs_compaction);
     try testing.expectEqual(off, store.end);
@@ -873,7 +911,8 @@ test "a record with a nonzero reserved field stops the replay" {
     @memcpy(flash.data[off..][0..record_header_len], std.mem.asBytes(&header));
     @memcpy(flash.data[off + record_header_len ..][0..4], std.mem.sliceAsBytes(wide("B")));
 
-    var store = TestStore.init(&flash);
+    var store: TestStore = undefined;
+    store.setup(&flash);
     try testing.expectEqual(LoadResult.recovered, store.load());
     try testing.expect(!store.needs_compaction);
     try testing.expectEqual(off, store.end);
@@ -895,7 +934,8 @@ test "garbage after the last record makes load compact to the other bank" {
     const off = appendRecord(&flash, 0, bank_header_len, wide("A"), &guid_a, 1, "ok");
     flash.data[off + 200] = 0x00;
 
-    var store = TestStore.init(&flash);
+    var store: TestStore = undefined;
+    store.setup(&flash);
     try testing.expectEqual(LoadResult.recovered, store.load());
     try testing.expect(!store.needs_compaction);
     try testing.expectEqual(off, store.end);
@@ -903,7 +943,8 @@ test "garbage after the last record makes load compact to the other bank" {
     try testing.expectEqual(@as(u32, 2), store.sequence);
     try testing.expectEqualStrings("ok", store.get(wide("A"), &guid_a).?.data);
 
-    var again = TestStore.init(&flash);
+    var again: TestStore = undefined;
+    again.setup(&flash);
     try testing.expectEqual(LoadResult.loaded, again.load());
     try testing.expectEqual(@as(u1, 1), again.active);
     try testing.expectEqualStrings("ok", again.get(wide("A"), &guid_a).?.data);
@@ -913,7 +954,8 @@ test "a clean log does not set needs_compaction" {
     var flash = TestFlash.init(1024);
     writeBankHeader(&flash, 0, 1, valid_mark);
     _ = appendRecord(&flash, 0, bank_header_len, wide("A"), &guid_a, 1, "ok");
-    var store = TestStore.init(&flash);
+    var store: TestStore = undefined;
+    store.setup(&flash);
     _ = store.load();
     try testing.expect(!store.needs_compaction);
 }
@@ -963,7 +1005,8 @@ fn clearCut(flash: *TestFlash) void {
 
 test "set, get, replace and remove on a fresh flash survive a reload" {
     var flash = TestFlash.init(1024);
-    var store = TestStore.init(&flash);
+    var store: TestStore = undefined;
+    store.setup(&flash);
     try testing.expectEqual(LoadResult.fresh, store.load());
     try store.set(wide("A"), &guid_a, nv_attribute, "one");
     try testing.expectEqual(@as(u1, 0), store.active);
@@ -978,7 +1021,8 @@ test "set, get, replace and remove on a fresh flash survive a reload" {
     try testing.expectEqual(@as(?Entry, null), store.get(wide("B"), &guid_a));
     try expectData(&store, wide("C"), &guid_b, "three");
 
-    var again = TestStore.init(&flash);
+    var again: TestStore = undefined;
+    again.setup(&flash);
     try testing.expectEqual(LoadResult.loaded, again.load());
     try testing.expectEqual(store.end, again.end);
     try expectData(&again, wide("A"), &guid_a, "uno");
@@ -994,7 +1038,8 @@ test "set, get, replace and remove on a fresh flash survive a reload" {
 
 test "replacing one variable until the bank is full compacts and keeps every variable" {
     var flash = TestFlash.init(1024);
-    var store = TestStore.init(&flash);
+    var store: TestStore = undefined;
+    store.setup(&flash);
     _ = store.load();
     try store.set(wide("B"), &guid_a, nv_attribute, "bravo");
     try store.set(wide("C"), &guid_b, nv_attribute, "charlie");
@@ -1014,7 +1059,8 @@ test "replacing one variable until the bank is full compacts and keeps every var
     const live = recordLen(4, 5) + recordLen(4, 7) + recordLen(4, 100);
     try testing.expectEqual(bank_header_len + live, store.end);
 
-    var again = TestStore.init(&flash);
+    var again: TestStore = undefined;
+    again.setup(&flash);
     try testing.expectEqual(LoadResult.loaded, again.load());
     try testing.expectEqual(@as(u32, 2), again.sequence);
     try expectData(&again, wide("F"), &guid_a, &last);
@@ -1024,7 +1070,8 @@ test "replacing one variable until the bank is full compacts and keeps every var
 
 test "set gives OutOfResources when live data fills the bank and changes nothing" {
     var flash = TestFlash.init(1024);
-    var store = TestStore.init(&flash);
+    var store: TestStore = undefined;
+    store.setup(&flash);
     _ = store.load();
     const big: [3000]u8 = @splat(1);
     try store.set(wide("A"), &guid_a, nv_attribute, &big);
@@ -1048,7 +1095,8 @@ test "set gives OutOfResources when live data fills the bank and changes nothing
 
 test "usage gives the bank capacity and the bytes of live records" {
     var flash = TestFlash.init(1024);
-    var store = TestStore.init(&flash);
+    var store: TestStore = undefined;
+    store.setup(&flash);
     _ = store.load();
     try testing.expectEqual(Usage{ .capacity = 4080, .live = 0 }, store.usage());
     try store.set(wide("A"), &guid_a, nv_attribute, "abc");
@@ -1059,7 +1107,8 @@ test "usage gives the bank capacity and the bytes of live records" {
 
 test "volatile variables are in get and next, use no flash and are gone after a reload" {
     var flash = TestFlash.init(1024);
-    var store = TestStore.init(&flash);
+    var store: TestStore = undefined;
+    store.setup(&flash);
     _ = store.load();
     try store.set(wide("A"), &guid_a, nv_attribute, "disk");
     const ops = flash.ops;
@@ -1080,7 +1129,8 @@ test "volatile variables are in get and next, use no flash and are gone after a 
     try testing.expectEqualSlices(u16, wide("V"), second.name);
     try testing.expectEqual(@as(?Key, null), store.next(second));
 
-    var again = TestStore.init(&flash);
+    var again: TestStore = undefined;
+    again.setup(&flash);
     try testing.expectEqual(LoadResult.loaded, again.load());
     try testing.expectEqual(@as(?Entry, null), again.get(wide("V"), &guid_a));
     try expectData(&again, wide("A"), &guid_a, "disk");
@@ -1088,7 +1138,8 @@ test "volatile variables are in get and next, use no flash and are gone after a 
 
 test "next starts in the volatile area when no variable is on flash" {
     var flash = TestFlash.init(1024);
-    var store = TestStore.init(&flash);
+    var store: TestStore = undefined;
+    store.setup(&flash);
     _ = store.load();
     try store.set(wide("V"), &guid_a, 0x6, "ram");
     const first = store.next(null).?;
@@ -1099,7 +1150,8 @@ test "next starts in the volatile area when no variable is on flash" {
 
 test "the volatile area compacts when it is full and keeps the live variables" {
     var flash = TestFlash.init(1024);
-    var store = TestStore.init(&flash);
+    var store: TestStore = undefined;
+    store.setup(&flash);
     _ = store.load();
     try store.set(wide("K"), &guid_a, 0x6, "kept");
     var n: u8 = 0;
@@ -1120,7 +1172,8 @@ test "the volatile area compacts when it is full and keeps the live variables" {
 
 test "set with the same attributes and data writes nothing" {
     var flash = TestFlash.init(1024);
-    var store = TestStore.init(&flash);
+    var store: TestStore = undefined;
+    store.setup(&flash);
     _ = store.load();
     try store.set(wide("A"), &guid_a, nv_attribute, "same");
     const ops = flash.ops;
@@ -1128,25 +1181,30 @@ test "set with the same attributes and data writes nothing" {
     try store.set(wide("A"), &guid_a, nv_attribute, "same");
     try testing.expectEqual(ops, flash.ops);
     try testing.expectEqual(end, store.end);
-    try store.set(wide("A"), &guid_a, nv_attribute | 0x2, "same");
-    try testing.expectEqual(ops + 1, flash.ops);
-    try testing.expectEqual(nv_attribute | 0x2, store.get(wide("A"), &guid_a).?.attributes);
+    try testing.expectError(error.InvalidParameter, store.set(wide("A"), &guid_a, nv_attribute | 0x2, "same"));
+    try testing.expectEqual(ops, flash.ops);
 }
 
-test "set gives InvalidParameter when the attributes move a variable between the areas" {
+test "set gives InvalidParameter when the attributes differ from the stored ones" {
     var flash = TestFlash.init(1024);
-    var store = TestStore.init(&flash);
+    var store: TestStore = undefined;
+    store.setup(&flash);
     _ = store.load();
     try store.set(wide("A"), &guid_a, nv_attribute, "disk");
     try store.set(wide("V"), &guid_a, 0x6, "ram");
     const ops = flash.ops;
     try testing.expectError(error.InvalidParameter, store.set(wide("A"), &guid_a, 0x6, "ram"));
     try testing.expectError(error.InvalidParameter, store.set(wide("V"), &guid_a, nv_attribute, "disk"));
+    try testing.expectError(error.InvalidParameter, store.set(wide("A"), &guid_a, nv_attribute | 0x6, "disk"));
+    try store.set(wide("R"), &guid_a, 0x2, "ram");
+    try testing.expectError(error.InvalidParameter, store.set(wide("R"), &guid_a, 0x6, "ram2"));
     try testing.expectEqual(ops, flash.ops);
     try expectData(&store, wide("A"), &guid_a, "disk");
     try expectData(&store, wide("V"), &guid_a, "ram");
 
-    // After a remove the name is free for the other area.
+    // After a remove the name takes new attributes.
+    try testing.expect(try store.remove(wide("R"), &guid_a));
+    try store.set(wide("R"), &guid_a, 0x6, "ram2");
     try testing.expect(try store.remove(wide("V"), &guid_a));
     try store.set(wide("V"), &guid_a, nv_attribute, "disk now");
     try expectData(&store, wide("V"), &guid_a, "disk now");
@@ -1154,7 +1212,8 @@ test "set gives InvalidParameter when the attributes move a variable between the
 
 test "set and remove reject a bad name and set rejects bad data lengths" {
     var flash = TestFlash.init(1024);
-    var store = TestStore.init(&flash);
+    var store: TestStore = undefined;
+    store.setup(&flash);
     _ = store.load();
     const unterminated = wide("AB")[0..2];
     try testing.expectError(error.InvalidParameter, store.set(unterminated, &guid_a, nv_attribute, "x"));
@@ -1170,7 +1229,8 @@ test "set and remove reject a bad name and set rejects bad data lengths" {
 
 test "remove gives false for a missing variable and writes nothing" {
     var flash = TestFlash.init(1024);
-    var store = TestStore.init(&flash);
+    var store: TestStore = undefined;
+    store.setup(&flash);
     _ = store.load();
     try testing.expect(!try store.remove(wide("A"), &guid_a));
     try store.set(wide("A"), &guid_a, nv_attribute, "x");
@@ -1181,7 +1241,8 @@ test "remove gives false for a missing variable and writes nothing" {
 
 test "remove of a variable when the bank is full compacts it away" {
     var flash = TestFlash.init(1024);
-    var store = TestStore.init(&flash);
+    var store: TestStore = undefined;
+    store.setup(&flash);
     _ = store.load();
     try store.set(wide("B"), &guid_a, nv_attribute, "bravo");
     const big: [4000]u8 = @splat(1);
@@ -1200,7 +1261,8 @@ fn bankRemaining(store: *const TestStore) usize {
 
 test "a flash error in set gives DeviceError and the next set compacts first" {
     var flash = TestFlash.init(1024);
-    var store = TestStore.init(&flash);
+    var store: TestStore = undefined;
+    store.setup(&flash);
     _ = store.load();
     try store.set(wide("A"), &guid_a, nv_attribute, "one");
     flash.cut_at = flash.ops;
@@ -1215,7 +1277,8 @@ test "a flash error in set gives DeviceError and the next set compacts first" {
     try testing.expectEqual(@as(u32, 2), store.sequence);
     try testing.expectEqual(@as(u1, 1), store.active);
 
-    var again = TestStore.init(&flash);
+    var again: TestStore = undefined;
+    again.setup(&flash);
     try testing.expectEqual(LoadResult.loaded, again.load());
     try expectData(&again, wide("A"), &guid_a, "one");
     try expectData(&again, wide("B"), &guid_a, "bravo");
@@ -1223,7 +1286,8 @@ test "a flash error in set gives DeviceError and the next set compacts first" {
 
 test "a torn append followed by a reload gives recovered" {
     var flash = TestFlash.init(1024);
-    var store = TestStore.init(&flash);
+    var store: TestStore = undefined;
+    store.setup(&flash);
     _ = store.load();
     try store.set(wide("A"), &guid_a, nv_attribute, "one");
     flash.cut_at = flash.ops;
@@ -1231,13 +1295,15 @@ test "a torn append followed by a reload gives recovered" {
     try testing.expectError(error.DeviceError, store.set(wide("A"), &guid_a, nv_attribute, "two"));
     clearCut(&flash);
 
-    var again = TestStore.init(&flash);
+    var again: TestStore = undefined;
+    again.setup(&flash);
     try testing.expectEqual(LoadResult.recovered, again.load());
     try testing.expect(!again.needs_compaction);
     try testing.expectEqual(@as(u32, 2), again.sequence);
     try expectData(&again, wide("A"), &guid_a, "one");
 
-    var third = TestStore.init(&flash);
+    var third: TestStore = undefined;
+    third.setup(&flash);
     try testing.expectEqual(LoadResult.loaded, third.load());
     try expectData(&third, wide("A"), &guid_a, "one");
 }
@@ -1255,7 +1321,8 @@ const SweepCount = struct {
 /// It returns the full length of the cut operation, or null when `S.run` has no such operation.
 fn cutOnce(comptime S: type, index: usize, cut_bytes: usize, count: *SweepCount) !?usize {
     var flash = TestFlash.init(test_geo.erase_size);
-    var store = TestStore.init(&flash);
+    var store: TestStore = undefined;
+    store.setup(&flash);
     _ = store.load();
     try S.prepare(&store);
     flash.cut_at = flash.ops + index;
@@ -1265,11 +1332,13 @@ fn cutOnce(comptime S: type, index: usize, cut_bytes: usize, count: *SweepCount)
     const len = flash.cut_len;
     clearCut(&flash);
 
-    var after = TestStore.init(&flash);
+    var after: TestStore = undefined;
+    after.setup(&flash);
     _ = after.load();
     const seen = try S.check(&after);
     try after.set(wide("After"), &guid_b, nv_attribute, "after");
-    var again = TestStore.init(&flash);
+    var again: TestStore = undefined;
+    again.setup(&flash);
     try testing.expectEqual(LoadResult.loaded, again.load());
     try testing.expectEqual(seen, try S.check(&again));
     try expectData(&again, wide("After"), &guid_b, "after");
@@ -1306,7 +1375,8 @@ fn sweep(comptime S: type, every_byte: bool) !SweepCount {
 /// The count of flash operations in `S.run` without a cut.
 fn opCount(comptime S: type) !usize {
     var flash = TestFlash.init(test_geo.erase_size);
-    var store = TestStore.init(&flash);
+    var store: TestStore = undefined;
+    store.setup(&flash);
     _ = store.load();
     try S.prepare(&store);
     const before = flash.ops;
