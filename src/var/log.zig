@@ -45,9 +45,21 @@ pub const Geometry = struct {
     /// Bytes used in each bank.
     bank_len: usize,
     erase_size: usize,
+    /// Bytes of RAM for variables without the non-volatile attribute.
+    volatile_len: usize = 16 * 1024,
 };
 
 pub const LoadResult = enum { fresh, loaded, recovered };
+
+pub const SetError = error{ OutOfResources, DeviceError, InvalidParameter };
+
+/// EFI_VARIABLE_NON_VOLATILE. Only variables with this attribute go to flash.
+pub const nv_attribute: u32 = 0x1;
+
+pub const Usage = struct {
+    capacity: usize,
+    live: usize,
+};
 
 pub const Entry = struct {
     attributes: u32,
@@ -102,9 +114,52 @@ const Record = struct {
     data: []const u8,
 
     fn sameKey(a: Record, b: Record) bool {
-        return std.mem.eql(u16, a.name, b.name) and std.mem.eql(u8, a.guid, b.guid);
+        return a.hasKey(.{ .name = b.name, .guid = b.guid });
+    }
+
+    fn hasKey(rec: Record, key: ?Key) bool {
+        const k = key orelse return false;
+        return std.mem.eql(u16, rec.name, k.name) and std.mem.eql(u8, rec.guid, k.guid);
     }
 };
+
+/// A variable to write. Empty data writes a delete.
+const Item = struct {
+    name: []const u16,
+    guid: *const [16]u8,
+    attributes: u32,
+    data: []const u8,
+
+    fn key(item: Item) Key {
+        return .{ .name = item.name, .guid = item.guid };
+    }
+
+    fn len(item: Item) usize {
+        return recordLen(item.name.len * 2, item.data.len);
+    }
+};
+
+/// Writes `item` as a record at the start of `dest`, with erased padding. It returns the record length.
+fn writeRecord(dest: []u8, item: Item) usize {
+    const name_bytes = std.mem.sliceAsBytes(item.name);
+    var header: RecordHeader = .{
+        .crc = 0,
+        .attributes = item.attributes,
+        .guid = item.guid.*,
+        .name_len = @intCast(name_bytes.len),
+        .reserved = 0,
+        .data_len = @intCast(item.data.len),
+    };
+    header.crc = recordCrc(header, name_bytes, item.data);
+    const len = item.len();
+    const used = record_header_len + name_bytes.len + item.data.len;
+    std.debug.assert(len <= dest.len);
+    @memcpy(dest[0..record_header_len], std.mem.asBytes(&header));
+    @memcpy(dest[record_header_len..][0..name_bytes.len], name_bytes);
+    @memcpy(dest[record_header_len + name_bytes.len ..][0..item.data.len], item.data);
+    @memset(dest[used..len], 0xff);
+    return len;
+}
 
 const Parsed = union(enum) {
     /// An erased header, or the end of the bank.
@@ -153,6 +208,80 @@ fn view(bank: []align(4) const u8, off: usize) Record {
     };
 }
 
+/// The records from `start` to `end` of `bytes`. All of them were checked by `parse` or built here.
+const Log = struct {
+    bytes: []align(4) const u8,
+    start: usize,
+    end: usize,
+
+    fn at(log: Log, off: usize) ?Record {
+        if (off >= log.end) return null;
+        return view(log.bytes, off);
+    }
+
+    /// A variable is live when its last record has data.
+    fn isLive(log: Log, rec: Record) bool {
+        if (rec.data.len == 0) return false;
+        var off = rec.offset + rec.len;
+        while (log.at(off)) |later| : (off += later.len) {
+            if (rec.sameKey(later)) return false;
+        }
+        return true;
+    }
+
+    fn get(log: Log, key: Key) ?Entry {
+        var found: ?Entry = null;
+        var off = log.start;
+        while (log.at(off)) |rec| : (off += rec.len) {
+            if (!rec.hasKey(key)) continue;
+            found = if (rec.data.len == 0) null else .{ .attributes = rec.attributes, .data = rec.data };
+        }
+        return found;
+    }
+
+    fn next(log: Log, prev: ?Key) ?Key {
+        var seen = prev == null;
+        var off = log.start;
+        while (log.at(off)) |rec| : (off += rec.len) {
+            if (!log.isLive(rec)) continue;
+            if (!seen) {
+                seen = rec.hasKey(prev);
+                continue;
+            }
+            return .{ .name = rec.name, .guid = rec.guid };
+        }
+        return null;
+    }
+
+    /// Bytes of the live records, without the records of `skip`.
+    fn liveBytes(log: Log, skip: ?Key) usize {
+        var total: usize = 0;
+        var off = log.start;
+        while (log.at(off)) |rec| : (off += rec.len) {
+            if (log.isLive(rec) and !rec.hasKey(skip)) total += rec.len;
+        }
+        return total;
+    }
+
+    /// Copies the live records, without the records of `skip`, to the start of `dest`.
+    /// It returns the bytes copied.
+    fn pack(log: Log, dest: []u8, skip: ?Key) usize {
+        var total: usize = 0;
+        var off = log.start;
+        while (log.at(off)) |rec| : (off += rec.len) {
+            if (!log.isLive(rec) or rec.hasKey(skip)) continue;
+            @memcpy(dest[total..][0..rec.len], log.bytes[off..][0..rec.len]);
+            total += rec.len;
+        }
+        return total;
+    }
+};
+
+fn checkName(name: []const u16) SetError!void {
+    if (name.len == 0 or name.len > max_name_units) return error.InvalidParameter;
+    if (name[name.len - 1] != 0) return error.InvalidParameter;
+}
+
 pub fn Store(comptime Flash: type, comptime geo: Geometry) type {
     comptime {
         if (geo.bank_len % record_align != 0) @compileError("bank_len must be a multiple of 4");
@@ -162,6 +291,13 @@ pub fn Store(comptime Flash: type, comptime geo: Geometry) type {
         if (a < b and a + geo.bank_len > b or b < a and b + geo.bank_len > a or a == b) {
             @compileError("the banks overlap");
         }
+        // A compaction erases whole units, so a unit must not hold bytes of both banks.
+        if (geo.erase_size == 0) @compileError("erase_size must not be 0");
+        if (a % geo.erase_size != 0 or b % geo.erase_size != 0) {
+            @compileError("the bank offsets must be aligned to erase_size");
+        }
+        if (geo.volatile_len % record_align != 0) @compileError("volatile_len must be a multiple of 4");
+        if (geo.volatile_len > geo.bank_len) @compileError("the volatile area must fit in the scratch image");
     }
 
     return struct {
@@ -169,7 +305,13 @@ pub fn Store(comptime Flash: type, comptime geo: Geometry) type {
 
         flash: *Flash,
         mirror: [geo.bank_len]u8 align(4),
+        /// The image of a bank that a compaction builds before it writes it.
+        scratch: [geo.bank_len]u8 align(4),
+        /// The records of the volatile variables. They start at offset 0.
+        ram: [geo.volatile_len]u8 align(4),
+        ram_end: usize,
         active: u1,
+        /// 0 when no bank is on flash.
         sequence: u32,
         /// Offset in `mirror` of the first byte after the last good record.
         end: usize,
@@ -180,6 +322,9 @@ pub fn Store(comptime Flash: type, comptime geo: Geometry) type {
             return .{
                 .flash = flash,
                 .mirror = @splat(0xff),
+                .scratch = @splat(0xff),
+                .ram = @splat(0xff),
+                .ram_end = 0,
                 .active = 0,
                 .sequence = 0,
                 .end = bank_header_len,
@@ -194,10 +339,13 @@ pub fn Store(comptime Flash: type, comptime geo: Geometry) type {
             if (header.magic != bank_magic) return null;
             if (header.crc != bankCrc(header.sequence)) return null;
             if (header.valid != valid_mark) return null;
+            // The writer starts at 1, so 0 can mark a store without a bank.
+            if (header.sequence == 0) return null;
             return header.sequence;
         }
 
         pub fn load(self: *Self) LoadResult {
+            self.ram_end = 0;
             self.mirror = @splat(0xff);
             self.active = 0;
             self.sequence = 0;
@@ -229,49 +377,156 @@ pub fn Store(comptime Flash: type, comptime geo: Geometry) type {
             }
             self.end = off;
             if (!allErased(self.mirror[off..])) self.needs_compaction = true;
-            return .loaded;
+            if (!self.needs_compaction) return .loaded;
+            // On a flash error `needs_compaction` stays set and the next write tries again.
+            self.compact(null, null) catch {};
+            return .recovered;
         }
 
-        fn recordAt(self: *const Self, off: usize) ?Record {
-            if (off >= self.end) return null;
-            return view(&self.mirror, off);
+        fn nvLog(self: *const Self) Log {
+            return .{ .bytes = &self.mirror, .start = bank_header_len, .end = self.end };
         }
 
-        /// A variable is live when its last record has data.
-        fn isLive(self: *const Self, rec: Record) bool {
-            if (rec.data.len == 0) return false;
-            var off = rec.offset + rec.len;
-            while (self.recordAt(off)) |later| : (off += later.len) {
-                if (rec.sameKey(later)) return false;
-            }
-            return true;
+        fn ramLog(self: *const Self) Log {
+            return .{ .bytes = &self.ram, .start = 0, .end = self.ram_end };
         }
 
         /// The name includes its terminator.
         pub fn get(self: *const Self, name: []const u16, guid: *const [16]u8) ?Entry {
-            var found: ?Entry = null;
-            var off: usize = bank_header_len;
-            while (self.recordAt(off)) |rec| : (off += rec.len) {
-                if (!std.mem.eql(u16, rec.name, name) or !std.mem.eql(u8, rec.guid, guid)) continue;
-                found = if (rec.data.len == 0) null else .{ .attributes = rec.attributes, .data = rec.data };
-            }
-            return found;
+            const key: Key = .{ .name = name, .guid = guid };
+            return self.nvLog().get(key) orelse self.ramLog().get(key);
         }
 
-        /// Live variables in log order. The order follows the last record of each.
+        /// Live variables on flash in log order, then the volatile ones in log order.
+        /// The order follows the last record of each.
         pub fn next(self: *const Self, prev: ?Key) ?Key {
-            var seen = prev == null;
-            var off: usize = bank_header_len;
-            while (self.recordAt(off)) |rec| : (off += rec.len) {
-                if (!self.isLive(rec)) continue;
-                if (!seen) {
-                    const p = prev.?;
-                    seen = std.mem.eql(u16, rec.name, p.name) and std.mem.eql(u8, rec.guid, p.guid);
-                    continue;
-                }
-                return .{ .name = rec.name, .guid = rec.guid };
+            const nv = self.nvLog();
+            const ram = self.ramLog();
+            const p = prev orelse return nv.next(null) orelse ram.next(null);
+            if (nv.get(p) != null) return nv.next(p) orelse ram.next(null);
+            return ram.next(p);
+        }
+
+        /// Writes a variable. The attributes select flash or the volatile area.
+        pub fn set(self: *Self, name: []const u16, guid: *const [16]u8, attributes: u32, data: []const u8) SetError!void {
+            try checkName(name);
+            if (data.len == 0 or data.len > max_data_len) return error.InvalidParameter;
+            const item: Item = .{ .name = name, .guid = guid, .attributes = attributes, .data = data };
+            const non_volatile = attributes & nv_attribute != 0;
+            const here: Log, const other: Log = if (non_volatile)
+                .{ self.nvLog(), self.ramLog() }
+            else
+                .{ self.ramLog(), self.nvLog() };
+            if (other.get(item.key()) != null) return error.InvalidParameter;
+            if (here.get(item.key())) |live| {
+                if (live.attributes == attributes and std.mem.eql(u8, live.data, data)) return;
             }
-            return null;
+            if (non_volatile) return self.writeFlash(item);
+            return self.writeRam(item);
+        }
+
+        /// Deletes a variable. It returns false when the variable does not exist.
+        pub fn remove(self: *Self, name: []const u16, guid: *const [16]u8) SetError!bool {
+            try checkName(name);
+            const item: Item = .{ .name = name, .guid = guid, .attributes = 0, .data = &.{} };
+            if (self.nvLog().get(item.key()) != null) {
+                try self.writeFlash(item);
+                return true;
+            }
+            if (self.ramLog().get(item.key()) != null) {
+                try self.writeRam(item);
+                return true;
+            }
+            return false;
+        }
+
+        /// The space for records in a flash bank, and the bytes the live ones use.
+        pub fn usage(self: *const Self) Usage {
+            return .{ .capacity = geo.bank_len - bank_header_len, .live = self.nvLog().liveBytes(null) };
+        }
+
+        fn writeFlash(self: *Self, item: Item) SetError!void {
+            const len = item.len();
+            if (self.sequence != 0 and !self.needs_compaction and len <= geo.bank_len - self.end) {
+                return self.append(item);
+            }
+            // The compaction drops the old records of the variable and puts the new one in the image.
+            const extra: ?Item = if (item.data.len == 0) null else item;
+            const extra_len = if (extra == null) 0 else len;
+            if (self.nvLog().liveBytes(item.key()) + extra_len > geo.bank_len - bank_header_len) {
+                return error.OutOfResources;
+            }
+            return self.compact(item.key(), extra);
+        }
+
+        fn append(self: *Self, item: Item) SetError!void {
+            const len = writeRecord(&self.scratch, item);
+            if (!self.flash.program(geo.bank_offsets[self.active] + self.end, self.scratch[0..len])) {
+                self.needs_compaction = true;
+                return error.DeviceError;
+            }
+            @memcpy(self.mirror[self.end..][0..len], self.scratch[0..len]);
+            self.end += len;
+        }
+
+        /// Writes the live records, without the records of `skip`, then `extra` to the other bank.
+        /// The new bank is used only after its valid mark is on flash.
+        fn compact(self: *Self, skip: ?Key, extra: ?Item) SetError!void {
+            const sequence = std.math.add(u32, self.sequence, 1) catch return error.DeviceError;
+            const target: u1 = if (self.sequence == 0) 0 else ~self.active;
+            const header: BankHeader = .{
+                .magic = bank_magic,
+                .sequence = sequence,
+                .crc = bankCrc(sequence),
+                .valid = 0xffff_ffff,
+            };
+            self.scratch = @splat(0xff);
+            @memcpy(self.scratch[0..bank_header_len], std.mem.asBytes(&header));
+            var end = bank_header_len + self.nvLog().pack(self.scratch[bank_header_len..], skip);
+            if (extra) |item| end += writeRecord(self.scratch[end..], item);
+
+            if (!self.writeBank(target, end)) {
+                self.needs_compaction = true;
+                return error.DeviceError;
+            }
+            self.mirror = self.scratch;
+            self.active = target;
+            self.sequence = sequence;
+            self.end = end;
+            self.needs_compaction = false;
+        }
+
+        /// Erases `bank` and programs `scratch` up to `end` into it, the valid mark last.
+        fn writeBank(self: *Self, bank: u1, end: usize) bool {
+            const base = geo.bank_offsets[bank];
+            var off: usize = 0;
+            while (off < geo.bank_len) : (off += geo.erase_size) {
+                if (!self.flash.erase(base + off)) return false;
+            }
+            if (!self.flash.program(base, self.scratch[0..bank_header_len])) return false;
+            off = bank_header_len;
+            while (off < end) {
+                const len = view(&self.scratch, off).len;
+                if (!self.flash.program(base + off, self.scratch[off..][0..len])) return false;
+                off += len;
+            }
+            return self.flash.program(base + @offsetOf(BankHeader, "valid"), std.mem.asBytes(&valid_mark));
+        }
+
+        fn writeRam(self: *Self, item: Item) SetError!void {
+            const len = item.len();
+            if (len <= geo.volatile_len - self.ram_end) {
+                self.ram_end += writeRecord(self.ram[self.ram_end..], item);
+                return;
+            }
+            const extra_len = if (item.data.len == 0) 0 else len;
+            const ram = self.ramLog();
+            if (ram.liveBytes(item.key()) + extra_len > geo.volatile_len) return error.OutOfResources;
+            // Build in `scratch`, because `item.data` can point into `ram`.
+            var end = ram.pack(&self.scratch, item.key());
+            if (item.data.len != 0) end += writeRecord(self.scratch[end..], item);
+            @memcpy(self.ram[0..end], self.scratch[0..end]);
+            self.ram_end = end;
         }
     };
 }
@@ -288,6 +543,8 @@ pub fn RamFlash(comptime size: usize) type {
         /// The operation with this index applies at most `cut_bytes` bytes. It and every later one return false.
         cut_at: ?usize = null,
         cut_bytes: usize = 0,
+        /// The full length of the cut operation.
+        cut_len: usize = 0,
         dead: bool = false,
 
         pub fn init(erase_size: usize) Self {
@@ -320,6 +577,7 @@ pub fn RamFlash(comptime size: usize) type {
             self.ops += 1;
             if (self.cut_at == index) {
                 self.dead = true;
+                self.cut_len = n.*;
                 n.* = @min(n.*, self.cut_bytes);
             }
             return true;
@@ -329,7 +587,12 @@ pub fn RamFlash(comptime size: usize) type {
 
 const testing = std.testing;
 
-const test_geo: Geometry = .{ .bank_offsets = .{ 0, 4096 }, .bank_len = 4096, .erase_size = 1024 };
+const test_geo: Geometry = .{
+    .bank_offsets = .{ 0, 4096 },
+    .bank_len = 4096,
+    .erase_size = 1024,
+    .volatile_len = 512,
+};
 const TestFlash = RamFlash(8192);
 const TestStore = Store(TestFlash, test_geo);
 
@@ -361,21 +624,8 @@ fn appendRecord(
     attributes: u32,
     data: []const u8,
 ) usize {
-    const name_bytes = std.mem.sliceAsBytes(name);
-    var header: RecordHeader = .{
-        .crc = 0,
-        .attributes = attributes,
-        .guid = guid.*,
-        .name_len = @intCast(name_bytes.len),
-        .reserved = 0,
-        .data_len = @intCast(data.len),
-    };
-    header.crc = recordCrc(header, name_bytes, data);
-    const base = test_geo.bank_offsets[bank] + off;
-    @memcpy(flash.data[base..][0..record_header_len], std.mem.asBytes(&header));
-    @memcpy(flash.data[base + record_header_len ..][0..name_bytes.len], name_bytes);
-    @memcpy(flash.data[base + record_header_len + name_bytes.len ..][0..data.len], data);
-    return off + recordLen(name_bytes.len, data.len);
+    const item: Item = .{ .name = name, .guid = guid, .attributes = attributes, .data = data };
+    return off + writeRecord(flash.data[test_geo.bank_offsets[bank] + off ..], item);
 }
 
 test "header sizes are 16 and 32 bytes" {
@@ -519,8 +769,8 @@ test "a record with a bad CRC stops the replay and keeps the earlier records" {
     flash.data[bad_at + record_header_len + 4] ^= 0x10;
 
     var store = TestStore.init(&flash);
-    try testing.expectEqual(LoadResult.loaded, store.load());
-    try testing.expect(store.needs_compaction);
+    try testing.expectEqual(LoadResult.recovered, store.load());
+    try testing.expect(!store.needs_compaction);
     try testing.expectEqual(bad_at, store.end);
     try testing.expectEqualStrings("keep", store.get(wide("A"), &guid_a).?.data);
     try testing.expectEqual(@as(?Entry, null), store.get(wide("B"), &guid_a));
@@ -543,8 +793,8 @@ test "a record longer than the limits stops the replay" {
     @memcpy(flash.data[off..][0..record_header_len], std.mem.asBytes(&header));
 
     var store = TestStore.init(&flash);
-    try testing.expectEqual(LoadResult.loaded, store.load());
-    try testing.expect(store.needs_compaction);
+    try testing.expectEqual(LoadResult.recovered, store.load());
+    try testing.expect(!store.needs_compaction);
     try testing.expectEqual(off, store.end);
     try testing.expectEqualStrings("ok", store.get(wide("A"), &guid_a).?.data);
 }
@@ -565,8 +815,8 @@ test "a name longer than the limit stops the replay" {
     @memcpy(flash.data[off..][0..record_header_len], std.mem.asBytes(&header));
 
     var store = TestStore.init(&flash);
-    try testing.expectEqual(LoadResult.loaded, store.load());
-    try testing.expect(store.needs_compaction);
+    try testing.expectEqual(LoadResult.recovered, store.load());
+    try testing.expect(!store.needs_compaction);
     try testing.expectEqual(off, store.end);
 }
 
@@ -587,8 +837,8 @@ test "a record that runs past the end of the bank stops the replay" {
     @memcpy(flash.data[off..][0..record_header_len], std.mem.asBytes(&header));
 
     var store = TestStore.init(&flash);
-    try testing.expectEqual(LoadResult.loaded, store.load());
-    try testing.expect(store.needs_compaction);
+    try testing.expectEqual(LoadResult.recovered, store.load());
+    try testing.expect(!store.needs_compaction);
     try testing.expectEqual(off, store.end);
     try testing.expectEqual(@as(usize, 3980), store.get(wide("A"), &guid_a).?.data.len);
 }
@@ -601,8 +851,8 @@ test "a name without a terminator stops the replay" {
     _ = appendRecord(&flash, 0, off, unterminated, &guid_a, 1, "bad");
 
     var store = TestStore.init(&flash);
-    try testing.expectEqual(LoadResult.loaded, store.load());
-    try testing.expect(store.needs_compaction);
+    try testing.expectEqual(LoadResult.recovered, store.load());
+    try testing.expect(!store.needs_compaction);
     try testing.expectEqual(off, store.end);
     try testing.expectEqual(@as(?Entry, null), store.get(unterminated, &guid_a));
 }
@@ -624,8 +874,8 @@ test "a record with a nonzero reserved field stops the replay" {
     @memcpy(flash.data[off + record_header_len ..][0..4], std.mem.sliceAsBytes(wide("B")));
 
     var store = TestStore.init(&flash);
-    try testing.expectEqual(LoadResult.loaded, store.load());
-    try testing.expect(store.needs_compaction);
+    try testing.expectEqual(LoadResult.recovered, store.load());
+    try testing.expect(!store.needs_compaction);
     try testing.expectEqual(off, store.end);
 }
 
@@ -639,17 +889,24 @@ test "a cut that covers every byte still makes the operation fail" {
     try testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0 }, flash.data[0..4]);
 }
 
-test "garbage after the last record sets needs_compaction" {
+test "garbage after the last record makes load compact to the other bank" {
     var flash = TestFlash.init(1024);
     writeBankHeader(&flash, 0, 1, valid_mark);
     const off = appendRecord(&flash, 0, bank_header_len, wide("A"), &guid_a, 1, "ok");
     flash.data[off + 200] = 0x00;
 
     var store = TestStore.init(&flash);
-    try testing.expectEqual(LoadResult.loaded, store.load());
-    try testing.expect(store.needs_compaction);
+    try testing.expectEqual(LoadResult.recovered, store.load());
+    try testing.expect(!store.needs_compaction);
     try testing.expectEqual(off, store.end);
+    try testing.expectEqual(@as(u1, 1), store.active);
+    try testing.expectEqual(@as(u32, 2), store.sequence);
     try testing.expectEqualStrings("ok", store.get(wide("A"), &guid_a).?.data);
+
+    var again = TestStore.init(&flash);
+    try testing.expectEqual(LoadResult.loaded, again.load());
+    try testing.expectEqual(@as(u1, 1), again.active);
+    try testing.expectEqualStrings("ok", again.get(wide("A"), &guid_a).?.data);
 }
 
 test "a clean log does not set needs_compaction" {
@@ -692,4 +949,504 @@ test "a cut erase clears only the first bytes of the unit" {
     try testing.expect(!flash.erase(500));
     try testing.expectEqual(@as(u8, 0xff), flash.data[99]);
     try testing.expectEqual(@as(u8, 0), flash.data[100]);
+}
+
+fn expectData(store: *const TestStore, name: []const u16, guid: *const [16]u8, data: []const u8) !void {
+    const entry = store.get(name, guid) orelse return error.TestExpectedEqual;
+    try testing.expectEqualStrings(data, entry.data);
+}
+
+fn clearCut(flash: *TestFlash) void {
+    flash.cut_at = null;
+    flash.dead = false;
+}
+
+test "set, get, replace and remove on a fresh flash survive a reload" {
+    var flash = TestFlash.init(1024);
+    var store = TestStore.init(&flash);
+    try testing.expectEqual(LoadResult.fresh, store.load());
+    try store.set(wide("A"), &guid_a, nv_attribute, "one");
+    try testing.expectEqual(@as(u1, 0), store.active);
+    try testing.expectEqual(@as(u32, 1), store.sequence);
+    try store.set(wide("B"), &guid_a, nv_attribute | 0x6, "two");
+    try store.set(wide("A"), &guid_a, nv_attribute, "uno");
+    try testing.expect(try store.remove(wide("B"), &guid_a));
+    try store.set(wide("C"), &guid_b, nv_attribute, "three");
+    try testing.expectEqual(@as(u32, 1), store.sequence);
+
+    try expectData(&store, wide("A"), &guid_a, "uno");
+    try testing.expectEqual(@as(?Entry, null), store.get(wide("B"), &guid_a));
+    try expectData(&store, wide("C"), &guid_b, "three");
+
+    var again = TestStore.init(&flash);
+    try testing.expectEqual(LoadResult.loaded, again.load());
+    try testing.expectEqual(store.end, again.end);
+    try expectData(&again, wide("A"), &guid_a, "uno");
+    try testing.expectEqual(nv_attribute, again.get(wide("A"), &guid_a).?.attributes);
+    try testing.expectEqual(@as(?Entry, null), again.get(wide("B"), &guid_a));
+    try expectData(&again, wide("C"), &guid_b, "three");
+    const first = again.next(null).?;
+    try testing.expectEqualSlices(u16, wide("A"), first.name);
+    const second = again.next(first).?;
+    try testing.expectEqualSlices(u16, wide("C"), second.name);
+    try testing.expectEqual(@as(?Key, null), again.next(second));
+}
+
+test "replacing one variable until the bank is full compacts and keeps every variable" {
+    var flash = TestFlash.init(1024);
+    var store = TestStore.init(&flash);
+    _ = store.load();
+    try store.set(wide("B"), &guid_a, nv_attribute, "bravo");
+    try store.set(wide("C"), &guid_b, nv_attribute, "charlie");
+
+    var n: u8 = 0;
+    while (store.sequence == 1) : (n += 1) {
+        try testing.expect(n < 100);
+        const value: [100]u8 = @splat(n);
+        try store.set(wide("F"), &guid_a, nv_attribute, &value);
+    }
+    try testing.expectEqual(@as(u32, 2), store.sequence);
+    try testing.expectEqual(@as(u1, 1), store.active);
+    const last: [100]u8 = @splat(n - 1);
+    try expectData(&store, wide("F"), &guid_a, &last);
+    try expectData(&store, wide("B"), &guid_a, "bravo");
+    try expectData(&store, wide("C"), &guid_b, "charlie");
+    const live = recordLen(4, 5) + recordLen(4, 7) + recordLen(4, 100);
+    try testing.expectEqual(bank_header_len + live, store.end);
+
+    var again = TestStore.init(&flash);
+    try testing.expectEqual(LoadResult.loaded, again.load());
+    try testing.expectEqual(@as(u32, 2), again.sequence);
+    try expectData(&again, wide("F"), &guid_a, &last);
+    try expectData(&again, wide("B"), &guid_a, "bravo");
+    try expectData(&again, wide("C"), &guid_b, "charlie");
+}
+
+test "set gives OutOfResources when live data fills the bank and changes nothing" {
+    var flash = TestFlash.init(1024);
+    var store = TestStore.init(&flash);
+    _ = store.load();
+    const big: [3000]u8 = @splat(1);
+    try store.set(wide("A"), &guid_a, nv_attribute, &big);
+    const before = store.usage();
+    const ops = flash.ops;
+
+    const other: [1100]u8 = @splat(2);
+    try testing.expectError(error.OutOfResources, store.set(wide("B"), &guid_a, nv_attribute, &other));
+    try testing.expectEqual(ops, flash.ops);
+    try testing.expectEqual(before, store.usage());
+    try testing.expectEqual(@as(u32, 1), store.sequence);
+    try expectData(&store, wide("A"), &guid_a, &big);
+    try testing.expectEqual(@as(?Entry, null), store.get(wide("B"), &guid_a));
+
+    // The new value fits once the old one is dropped.
+    const bigger: [3500]u8 = @splat(3);
+    try store.set(wide("A"), &guid_a, nv_attribute, &bigger);
+    try testing.expectEqual(@as(u32, 2), store.sequence);
+    try expectData(&store, wide("A"), &guid_a, &bigger);
+}
+
+test "usage gives the bank capacity and the bytes of live records" {
+    var flash = TestFlash.init(1024);
+    var store = TestStore.init(&flash);
+    _ = store.load();
+    try testing.expectEqual(Usage{ .capacity = 4080, .live = 0 }, store.usage());
+    try store.set(wide("A"), &guid_a, nv_attribute, "abc");
+    try store.set(wide("A"), &guid_a, nv_attribute, "abcdefgh");
+    try store.set(wide("V"), &guid_a, 0x6, "ram");
+    try testing.expectEqual(Usage{ .capacity = 4080, .live = recordLen(4, 8) }, store.usage());
+}
+
+test "volatile variables are in get and next, use no flash and are gone after a reload" {
+    var flash = TestFlash.init(1024);
+    var store = TestStore.init(&flash);
+    _ = store.load();
+    try store.set(wide("A"), &guid_a, nv_attribute, "disk");
+    const ops = flash.ops;
+
+    try store.set(wide("V"), &guid_a, 0x6, "ram");
+    try store.set(wide("W"), &guid_a, 0x2, "ram two");
+    try store.set(wide("V"), &guid_a, 0x6, "ram three");
+    try testing.expect(try store.remove(wide("W"), &guid_a));
+    try testing.expectEqual(ops, flash.ops);
+
+    const v = store.get(wide("V"), &guid_a).?;
+    try testing.expectEqual(@as(u32, 0x6), v.attributes);
+    try testing.expectEqualStrings("ram three", v.data);
+    try testing.expectEqual(@as(?Entry, null), store.get(wide("W"), &guid_a));
+    const first = store.next(null).?;
+    try testing.expectEqualSlices(u16, wide("A"), first.name);
+    const second = store.next(first).?;
+    try testing.expectEqualSlices(u16, wide("V"), second.name);
+    try testing.expectEqual(@as(?Key, null), store.next(second));
+
+    var again = TestStore.init(&flash);
+    try testing.expectEqual(LoadResult.loaded, again.load());
+    try testing.expectEqual(@as(?Entry, null), again.get(wide("V"), &guid_a));
+    try expectData(&again, wide("A"), &guid_a, "disk");
+}
+
+test "next starts in the volatile area when no variable is on flash" {
+    var flash = TestFlash.init(1024);
+    var store = TestStore.init(&flash);
+    _ = store.load();
+    try store.set(wide("V"), &guid_a, 0x6, "ram");
+    const first = store.next(null).?;
+    try testing.expectEqualSlices(u16, wide("V"), first.name);
+    try testing.expectEqual(@as(?Key, null), store.next(first));
+    try testing.expectEqual(@as(usize, 0), flash.ops);
+}
+
+test "the volatile area compacts when it is full and keeps the live variables" {
+    var flash = TestFlash.init(1024);
+    var store = TestStore.init(&flash);
+    _ = store.load();
+    try store.set(wide("K"), &guid_a, 0x6, "kept");
+    var n: u8 = 0;
+    while (n < 40) : (n += 1) {
+        const value: [64]u8 = @splat(n);
+        try store.set(wide("V"), &guid_a, 0x6, &value);
+    }
+    const last: [64]u8 = @splat(39);
+    try expectData(&store, wide("V"), &guid_a, &last);
+    try expectData(&store, wide("K"), &guid_a, "kept");
+    try testing.expectEqual(@as(usize, 0), flash.ops);
+
+    const big: [400]u8 = @splat(1);
+    try testing.expectError(error.OutOfResources, store.set(wide("W"), &guid_a, 0x6, &big));
+    try expectData(&store, wide("V"), &guid_a, &last);
+    try testing.expectEqual(@as(?Entry, null), store.get(wide("W"), &guid_a));
+}
+
+test "set with the same attributes and data writes nothing" {
+    var flash = TestFlash.init(1024);
+    var store = TestStore.init(&flash);
+    _ = store.load();
+    try store.set(wide("A"), &guid_a, nv_attribute, "same");
+    const ops = flash.ops;
+    const end = store.end;
+    try store.set(wide("A"), &guid_a, nv_attribute, "same");
+    try testing.expectEqual(ops, flash.ops);
+    try testing.expectEqual(end, store.end);
+    try store.set(wide("A"), &guid_a, nv_attribute | 0x2, "same");
+    try testing.expectEqual(ops + 1, flash.ops);
+    try testing.expectEqual(nv_attribute | 0x2, store.get(wide("A"), &guid_a).?.attributes);
+}
+
+test "set gives InvalidParameter when the attributes move a variable between the areas" {
+    var flash = TestFlash.init(1024);
+    var store = TestStore.init(&flash);
+    _ = store.load();
+    try store.set(wide("A"), &guid_a, nv_attribute, "disk");
+    try store.set(wide("V"), &guid_a, 0x6, "ram");
+    const ops = flash.ops;
+    try testing.expectError(error.InvalidParameter, store.set(wide("A"), &guid_a, 0x6, "ram"));
+    try testing.expectError(error.InvalidParameter, store.set(wide("V"), &guid_a, nv_attribute, "disk"));
+    try testing.expectEqual(ops, flash.ops);
+    try expectData(&store, wide("A"), &guid_a, "disk");
+    try expectData(&store, wide("V"), &guid_a, "ram");
+
+    // After a remove the name is free for the other area.
+    try testing.expect(try store.remove(wide("V"), &guid_a));
+    try store.set(wide("V"), &guid_a, nv_attribute, "disk now");
+    try expectData(&store, wide("V"), &guid_a, "disk now");
+}
+
+test "set and remove reject a bad name and set rejects bad data lengths" {
+    var flash = TestFlash.init(1024);
+    var store = TestStore.init(&flash);
+    _ = store.load();
+    const unterminated = wide("AB")[0..2];
+    try testing.expectError(error.InvalidParameter, store.set(unterminated, &guid_a, nv_attribute, "x"));
+    try testing.expectError(error.InvalidParameter, store.set(&.{}, &guid_a, nv_attribute, "x"));
+    const long_name: [max_name_units + 1]u16 = @splat(0);
+    try testing.expectError(error.InvalidParameter, store.set(&long_name, &guid_a, nv_attribute, "x"));
+    try testing.expectError(error.InvalidParameter, store.set(wide("A"), &guid_a, nv_attribute, ""));
+    const too_long: [max_data_len + 1]u8 = @splat(0);
+    try testing.expectError(error.InvalidParameter, store.set(wide("A"), &guid_a, nv_attribute, &too_long));
+    try testing.expectError(error.InvalidParameter, store.remove(unterminated, &guid_a));
+    try testing.expectEqual(@as(usize, 0), flash.ops);
+}
+
+test "remove gives false for a missing variable and writes nothing" {
+    var flash = TestFlash.init(1024);
+    var store = TestStore.init(&flash);
+    _ = store.load();
+    try testing.expect(!try store.remove(wide("A"), &guid_a));
+    try store.set(wide("A"), &guid_a, nv_attribute, "x");
+    const ops = flash.ops;
+    try testing.expect(!try store.remove(wide("A"), &guid_b));
+    try testing.expectEqual(ops, flash.ops);
+}
+
+test "remove of a variable when the bank is full compacts it away" {
+    var flash = TestFlash.init(1024);
+    var store = TestStore.init(&flash);
+    _ = store.load();
+    try store.set(wide("B"), &guid_a, nv_attribute, "bravo");
+    const big: [4000]u8 = @splat(1);
+    try store.set(wide("A"), &guid_a, nv_attribute, &big);
+    try testing.expect(bankRemaining(&store) < recordLen(4, 0));
+    try testing.expect(try store.remove(wide("A"), &guid_a));
+    try testing.expectEqual(@as(u32, 2), store.sequence);
+    try testing.expectEqual(@as(?Entry, null), store.get(wide("A"), &guid_a));
+    try expectData(&store, wide("B"), &guid_a, "bravo");
+    try testing.expectEqual(bank_header_len + recordLen(4, 5), store.end);
+}
+
+fn bankRemaining(store: *const TestStore) usize {
+    return test_geo.bank_len - store.end;
+}
+
+test "a flash error in set gives DeviceError and the next set compacts first" {
+    var flash = TestFlash.init(1024);
+    var store = TestStore.init(&flash);
+    _ = store.load();
+    try store.set(wide("A"), &guid_a, nv_attribute, "one");
+    flash.cut_at = flash.ops;
+    flash.cut_bytes = 0;
+    try testing.expectError(error.DeviceError, store.set(wide("A"), &guid_a, nv_attribute, "two"));
+    try testing.expect(store.needs_compaction);
+    try expectData(&store, wide("A"), &guid_a, "one");
+
+    clearCut(&flash);
+    try store.set(wide("B"), &guid_a, nv_attribute, "bravo");
+    try testing.expect(!store.needs_compaction);
+    try testing.expectEqual(@as(u32, 2), store.sequence);
+    try testing.expectEqual(@as(u1, 1), store.active);
+
+    var again = TestStore.init(&flash);
+    try testing.expectEqual(LoadResult.loaded, again.load());
+    try expectData(&again, wide("A"), &guid_a, "one");
+    try expectData(&again, wide("B"), &guid_a, "bravo");
+}
+
+test "a torn append followed by a reload gives recovered" {
+    var flash = TestFlash.init(1024);
+    var store = TestStore.init(&flash);
+    _ = store.load();
+    try store.set(wide("A"), &guid_a, nv_attribute, "one");
+    flash.cut_at = flash.ops;
+    flash.cut_bytes = 10;
+    try testing.expectError(error.DeviceError, store.set(wide("A"), &guid_a, nv_attribute, "two"));
+    clearCut(&flash);
+
+    var again = TestStore.init(&flash);
+    try testing.expectEqual(LoadResult.recovered, again.load());
+    try testing.expect(!again.needs_compaction);
+    try testing.expectEqual(@as(u32, 2), again.sequence);
+    try expectData(&again, wide("A"), &guid_a, "one");
+
+    var third = TestStore.init(&flash);
+    try testing.expectEqual(LoadResult.loaded, third.load());
+    try expectData(&third, wide("A"), &guid_a, "one");
+}
+
+/// Which of the two allowed values a reload found.
+const Seen = enum { old, new };
+
+const SweepCount = struct {
+    points: usize = 0,
+    old: usize = 0,
+    new: usize = 0,
+};
+
+/// Cuts operation `index` of `S.run` after `cut_bytes` bytes, then reloads and checks the store.
+/// It returns the full length of the cut operation, or null when `S.run` has no such operation.
+fn cutOnce(comptime S: type, index: usize, cut_bytes: usize, count: *SweepCount) !?usize {
+    var flash = TestFlash.init(test_geo.erase_size);
+    var store = TestStore.init(&flash);
+    _ = store.load();
+    try S.prepare(&store);
+    flash.cut_at = flash.ops + index;
+    flash.cut_bytes = cut_bytes;
+    S.run(&store);
+    if (!flash.dead) return null;
+    const len = flash.cut_len;
+    clearCut(&flash);
+
+    var after = TestStore.init(&flash);
+    _ = after.load();
+    const seen = try S.check(&after);
+    try after.set(wide("After"), &guid_b, nv_attribute, "after");
+    var again = TestStore.init(&flash);
+    try testing.expectEqual(LoadResult.loaded, again.load());
+    try testing.expectEqual(seen, try S.check(&again));
+    try expectData(&again, wide("After"), &guid_b, "after");
+
+    count.points += 1;
+    switch (seen) {
+        .old => count.old += 1,
+        .new => count.new += 1,
+    }
+    return len;
+}
+
+/// Cuts every operation of `S.run` in turn. With `every_byte` it tries each byte count
+/// from 0 to the full length, else 0, 1, half and all but one.
+fn sweep(comptime S: type, every_byte: bool) !SweepCount {
+    var count: SweepCount = .{};
+    var index: usize = 0;
+    while (try cutOnce(S, index, 0, &count)) |len| : (index += 1) {
+        if (every_byte) {
+            var bytes: usize = 1;
+            while (bytes <= len) : (bytes += 1) _ = try cutOnce(S, index, bytes, &count);
+            continue;
+        }
+        var last: usize = 0;
+        for ([_]usize{ 1, len / 2, len - 1 }) |bytes| {
+            if (bytes <= last or bytes >= len) continue;
+            last = bytes;
+            _ = try cutOnce(S, index, bytes, &count);
+        }
+    }
+    return count;
+}
+
+/// The count of flash operations in `S.run` without a cut.
+fn opCount(comptime S: type) !usize {
+    var flash = TestFlash.init(test_geo.erase_size);
+    var store = TestStore.init(&flash);
+    _ = store.load();
+    try S.prepare(&store);
+    const before = flash.ops;
+    S.run(&store);
+    return flash.ops - before;
+}
+
+const base_vars = [_]struct { name: []const u16, data: []const u8 }{
+    .{ .name = wide("B"), .data = "bravo" },
+    .{ .name = wide("C"), .data = "charlie" },
+    .{ .name = wide("D"), .data = "delta" },
+};
+
+fn setBase(store: *TestStore) !void {
+    try store.set(wide("A"), &guid_a, nv_attribute, "old");
+    for (base_vars) |v| try store.set(v.name, &guid_a, nv_attribute, v.data);
+}
+
+/// Checks the base variables and gives which value `A` has. A null `new` means a delete.
+fn checkBase(store: *const TestStore, new: ?[]const u8) !Seen {
+    for (base_vars) |v| try expectData(store, v.name, &guid_a, v.data);
+    const a = store.get(wide("A"), &guid_a);
+    if (a) |entry| {
+        if (std.mem.eql(u8, entry.data, "old")) return .old;
+        if (new != null and std.mem.eql(u8, entry.data, new.?)) return .new;
+        return error.TestUnexpectedResult;
+    }
+    return if (new == null) .new else error.TestUnexpectedResult;
+}
+
+const AppendSet = struct {
+    const prepare = setBase;
+    fn run(store: *TestStore) void {
+        store.set(wide("A"), &guid_a, nv_attribute, "new value") catch {};
+    }
+    fn check(store: *const TestStore) !Seen {
+        return checkBase(store, "new value");
+    }
+};
+
+const AppendRemove = struct {
+    const prepare = setBase;
+    fn run(store: *TestStore) void {
+        _ = store.remove(wide("A"), &guid_a) catch false;
+    }
+    fn check(store: *const TestStore) !Seen {
+        return checkBase(store, null);
+    }
+};
+
+test "a power loss at any byte of an append keeps the old or the new value" {
+    const count = try sweep(AppendSet, true);
+    try testing.expectEqual(@as(usize, 1), try opCount(AppendSet));
+    try testing.expectEqual(recordLen(4, 9) + 1, count.points);
+    try testing.expect(count.old > 0 and count.new > 0);
+}
+
+test "a power loss at any byte of a delete keeps the variable or removes it" {
+    const count = try sweep(AppendRemove, true);
+    try testing.expectEqual(@as(usize, 1), try opCount(AppendRemove));
+    try testing.expectEqual(recordLen(4, 0) + 1, count.points);
+    try testing.expect(count.old > 0 and count.new > 0);
+}
+
+/// Fills both banks once, so the compaction under test erases an older valid bank.
+const CompactSet = struct {
+    const f_len = 120;
+    var f_last: [f_len]u8 = undefined;
+
+    fn prepare(store: *TestStore) !void {
+        try setBase(store);
+        const f_rec_len = recordLen(4, f_len);
+        var n: u8 = 0;
+        while (store.sequence < 2 or test_geo.bank_len - store.end >= f_rec_len) : (n += 1) {
+            try testing.expect(n < 200);
+            f_last = @splat(n);
+            try store.set(wide("F"), &guid_a, nv_attribute, &f_last);
+        }
+        try testing.expectEqual(@as(u32, 2), store.sequence);
+        try testing.expect(test_geo.bank_len - store.end < recordLen(4, new_value.len));
+    }
+    const new_value: [160]u8 = @splat(0x5a);
+    fn run(store: *TestStore) void {
+        store.set(wide("A"), &guid_a, nv_attribute, &new_value) catch {};
+    }
+    fn check(store: *const TestStore) !Seen {
+        try expectData(store, wide("F"), &guid_a, &f_last);
+        return checkBase(store, &new_value);
+    }
+};
+
+test "a power loss in a compaction keeps the old value and every other variable" {
+    const ops = try opCount(CompactSet);
+    // Four erase units, the header, five records and the valid mark.
+    try testing.expectEqual(@as(usize, 4 + 1 + 5 + 1), ops);
+    const count = try sweep(CompactSet, false);
+    try testing.expectEqual(ops * 4, count.points);
+    try testing.expectEqual(@as(usize, 0), count.new);
+}
+
+/// Leaves garbage after the last record, so `load` starts a compaction.
+const LoadRecovery = struct {
+    fn prepare(store: *TestStore) !void {
+        try setBase(store);
+        const junk: [8]u8 = @splat(0);
+        try testing.expect(store.flash.program(test_geo.bank_offsets[store.active] + store.end + 40, &junk));
+    }
+    fn run(store: *TestStore) void {
+        _ = store.load();
+    }
+    fn check(store: *const TestStore) !Seen {
+        return checkBase(store, "old");
+    }
+};
+
+test "a power loss in the compaction that load starts is recovered on the next load" {
+    const ops = try opCount(LoadRecovery);
+    try testing.expectEqual(@as(usize, 4 + 1 + 4 + 1), ops);
+    const count = try sweep(LoadRecovery, false);
+    try testing.expectEqual(ops * 4, count.points);
+}
+
+const FirstSet = struct {
+    fn prepare(store: *TestStore) !void {
+        _ = store;
+    }
+    fn run(store: *TestStore) void {
+        store.set(wide("A"), &guid_a, nv_attribute, "first") catch {};
+    }
+    fn check(store: *const TestStore) !Seen {
+        const a = store.get(wide("A"), &guid_a) orelse return .old;
+        try testing.expectEqualStrings("first", a.data);
+        return .new;
+    }
+};
+
+test "a power loss while the first set creates bank 0 leaves an empty store" {
+    const ops = try opCount(FirstSet);
+    try testing.expectEqual(@as(usize, 4 + 1 + 1 + 1), ops);
+    const count = try sweep(FirstSet, false);
+    try testing.expectEqual(ops * 4, count.points);
+    try testing.expectEqual(@as(usize, 0), count.new);
 }
