@@ -22,9 +22,9 @@ The code lives in `src/fsbl/`.
 
 `src/fsbl/start.zig` holds the reset vector. `src/fsbl/main.zig` holds the flow.
 
-1. **Reset.** `_start` sets the global and stack pointers, then tail-calls
-   `fsblMain`. Only the boot hart runs the FSBL. The other harts wait for the
-   main firmware's HSM.
+1. **Reset.** `_start` points `mtvec` at the FSBL trap handler, sets the global
+   and stack pointers, then tail-calls `fsblMain`. Only the boot hart runs the
+   FSBL. The other harts wait for the main firmware's HSM.
 2. **XIP setup.** The FSBL runs in place from read-only flash, so its writable
    globals do not exist yet. `fsblMain` copies the initialized `.data` from its
    flash load image into the DRAM window, then zeroes `.bss`.

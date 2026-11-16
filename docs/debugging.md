@@ -54,6 +54,18 @@ The FSBL prints a marker at each step: `[fsbl] train:` for the DDR training,
 `[fsbl] ddr:` for the read eye, and `[fsbl] flash:` for the image copy. The last
 marker before a stall says where it stopped.
 
+A trap in the FSBL prints one line and halts:
+
+```
+[fsbl] trap: mcause=7 mepc=20016864 mtval=a0000000
+[fsbl] halted
+```
+
+The values are hex, the same as the main firmware trap dump. The handler uses
+only registers and the UART registers, so it works with a bad stack pointer or
+with RAM that does not work. It programs the UART divisor again before it sends.
+A second trap in the handler halts the hart with no output.
+
 ## OpenOCD
 
 River ships `openocd.cfg` files. Use them to attach OpenOCD over JTAG, then

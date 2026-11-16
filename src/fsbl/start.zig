@@ -7,6 +7,10 @@
 
 const main = @import("main.zig");
 
+comptime {
+    _ = @import("trap.zig");
+}
+
 pub const panic = main.panic;
 
 extern var __bss_start: u8;
@@ -19,7 +23,14 @@ extern var _data_end: u8;
 // need by that exact name.
 // zippy:ignore naming_convention
 export fn _start() linksection(".text.boot") callconv(.naked) noreturn {
+    // Set mtvec first, so a fault prints on the UART and does not go back to
+    // the mask ROM.
     asm volatile (
+        \\ .option push
+        \\ .option norelax
+        \\ la t0, fsblTrapEntry
+        \\ csrw mtvec, t0
+        \\ .option pop
         \\ csrw mie, zero
         \\ csrw mip, zero
         \\ .option push
