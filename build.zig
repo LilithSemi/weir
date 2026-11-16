@@ -214,6 +214,7 @@ pub fn build(b: *std.Build) void {
     const pure_tests = [_][]const u8{
         "src/acpi/madt.zig",
         "src/acpi/tables.zig",
+        "src/flash/spi_nor.zig",
         "src/smbios/structs.zig",
         "src/smbios/table.zig",
         "src/var/log.zig",
