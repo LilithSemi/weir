@@ -13,7 +13,6 @@ const soc = @import("soc");
 // runtime-DT world that Weir no longer walks. fw-cfg is discovered from the tree
 // (soc.fwcfg_base): QEMU's virt machine has it, a real River SoC does not.
 const reset_base_v: usize = 0x100000;
-const cfi_flash_base_v: usize = 0;
 
 /// Discovery is comptime through soc.zig and conduit, so there is nothing to do
 /// at runtime. This stub stays so call sites need not change.
@@ -52,9 +51,6 @@ pub fn tpmBase() usize {
 }
 pub fn fwcfgBase() usize {
     return soc.fwcfg_base;
-}
-pub fn cfiFlashBase() usize {
-    return cfi_flash_base_v;
 }
 pub fn sdhciBase() usize {
     return soc.sdhci_base;

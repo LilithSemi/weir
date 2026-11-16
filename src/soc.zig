@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const conduit = @import("conduit");
+const flash_dt = @import("flash_dt.zig");
 const has_dt = @import("build_options").has_dtb;
 
 // One matcher per SoC device class that Weir bakes in. conduit walks the
@@ -140,6 +141,50 @@ pub const rtc_base: usize = if (rtc_mmio) |r| @intCast(r.base) else 0;
 pub const ram_base: usize = if (firstMmio(.memory)) |r| @intCast(r.base) else 0x80000000;
 pub const ram_size: usize = if (firstMmio(.memory)) |r| @intCast(r.size) else 0x10000000;
 pub const flash_base: usize = if (firstMmio(.flash)) |r| @intCast(r.base) else 0x20000000;
+
+// The SPI flash write port, the flash partitions and the CFI banks, read from
+// the tree in one walk.
+// A function, so the scan result exists at comptime only and takes no image space.
+fn flashScan() flash_dt.Scan {
+    return comptime if (has_dt) blk: {
+        @setEvalBranchQuota(8_000_000);
+        break :blk flash_dt.scan(@embedFile("soc_dtb"));
+    } else .{};
+}
+
+pub const FlashPartition = flash_dt.Partition;
+
+/// The write port of the SPI flash controller. Null when the tree has none.
+pub const flash_ctrl_base: ?usize = if (flashScan().norRegion("ctrl")) |r| @intCast(r.base) else null;
+
+/// The memory mapped read region that `reg-names` calls "xip". Null when the tree has none.
+pub const flash_xip: ?struct { base: usize, size: usize } = if (flashScan().norRegion("xip")) |r|
+    .{ .base = @intCast(r.base), .size = @intCast(r.size) }
+else
+    null;
+
+comptime {
+    if (flashScan().malformed)
+        @compileError("a flash partition node in the device tree has a reg that does not decode");
+    if (flashScan().count > flash_dt.max_partitions)
+        @compileError("the device tree has more flash partitions than flash_dt.max_partitions");
+}
+
+const flash_partitions_arr: [flashScan().partitions().len]FlashPartition = blk: {
+    var arr: [flashScan().partitions().len]FlashPartition = undefined;
+    for (flashScan().partitions(), 0..) |p, i| arr[i] = p;
+    break :blk arr;
+};
+
+/// Every flash partition, in device tree order. The index is the bit number in
+/// the lock mask.
+pub const flash_partitions: []const FlashPartition = &flash_partitions_arr;
+
+/// Index of the `river-vars` partition in `flash_partitions`.
+pub const vars_partition_index: ?usize = flash_dt.findPartition(flash_partitions, "river-vars");
+
+/// The second bank of a `cfi-flash` node (QEMU virt). The variable store uses it.
+pub const cfi_vars_base: ?usize = if (flashScan().cfiBank(1)) |r| @intCast(r.base) else null;
 
 const tpm_mmio = firstMmio(.tpm);
 pub const tpm_present: bool = tpm_mmio != null;

@@ -264,6 +264,16 @@ pub fn build(b: *std.Build) void {
     if (dtb_path) |p| soc_test_mod.addAnonymousImport("soc_dtb", .{ .root_source_file = p });
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = soc_test_mod })).step);
 
+    // src/flash_dt.zig reads the flash ports and partitions from a tree. Its
+    // tests build their trees with dtree.Builder, so no fixture file exists.
+    const flash_dt_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/flash_dt.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    flash_dt_test_mod.addImport("conduit", conduit_host);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = flash_dt_test_mod })).step);
+
     // src/fsbl/ddr_train.zig holds the runtime DDR training engine: device-tree
     // parsing, the leveling-window search, and the hardware register access.
     // `refAllDecls` in the file's own test block forces the compiler to
