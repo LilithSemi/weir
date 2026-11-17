@@ -25,6 +25,7 @@ const clint = @import("arch/riscv/clint.zig");
 const soc = @import("soc");
 const update_serial = @import("update/serial.zig");
 const update_uart = @import("update/uart.zig");
+const sd_trace = @import("drivers/sd_trace.zig");
 
 /// Firmware panic handler. The UART is reachable from both M- and S-mode, so it
 /// reports wherever a panic happens, then parks the hart.
@@ -516,8 +517,20 @@ fn serialUpdate() void {
     var engine: update_serial.Engine(update_uart.Transport, storage.Device) = .{
         .transport = &link,
         .devices = storage.devices(),
+        .hooks = .{ .rescan = rescanStorage, .probe = traceSdHost },
     };
     engine.run();
+}
+
+fn rescanStorage() []const storage.Device {
+    _ = storage.rescan();
+    return storage.devices();
+}
+
+fn traceSdHost(index: u8, out: []u8) ?usize {
+    const hosts = platform.sdhciControllers();
+    if (index >= hosts.len) return null;
+    return sd_trace.run(hosts[index].base, hosts[index].freq, out);
 }
 
 /// Resolve the S-mode handoff, either a UEFI app under an EFI System Table or

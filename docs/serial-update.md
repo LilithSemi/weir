@@ -61,6 +61,8 @@ Two rules keep the host and Weir in step after an error:
 | 3 | crc | device u8, lba u64, count u32 (1 to 2048) | CRC-32 u32 of the blocks |
 | 4 | baud | baud u32 | none, sent at the old rate |
 | 5 | boot | none | none |
+| 6 | rescan | none | device count u8 |
+| 7 | probe | SD host u8 | trace records, see below |
 
 The info reply has the version u8 (1), the maximum blocks for one write u8 (8)
 and the device count u8. Then for each device it has:
@@ -78,6 +80,27 @@ the same order as the boot manager uses. Write and crc accept only devices with
 
 After the reply to `boot`, Weir leaves the mode and starts the boot manager. The
 boot then uses the new contents of the card. No reset command exists.
+
+`rescan` finds the block devices again, as at boot. Send `info` after it,
+because the device list can change.
+
+`probe` sends the SD identification commands to one SD host (the index is the
+order of the hosts in the device tree) and gives one 16 byte record for each
+step. Use it when the card is not found. The card is in the identification
+state after a probe, so send `rescan` before the next `write` or `crc`.
+
+| Field | Size | Notes |
+| --- | --- | --- |
+| opcode | 1 | the SD command index. 0xff is the first record, the controller state before the first command |
+| outcome | 1 | 0 ok, 1 controller busy before the command, 2 controller busy after it, 3 no response from the card |
+| count | 2 | for commands 55 and 41, the number of tries. Only the last try has records |
+| INT_STATUS | 4 | the controller register after the command |
+| response | 4 | the first response word (RESP0) |
+| STATUS | 4 | the controller register after the command. Bit 0 is card detect |
+
+The steps are commands 0, 8, then 55 and 41 until the card is ready (2000 tries
+at most), then 2 and 3. The trace stops at the step that makes the next one
+useless.
 
 ## Status codes
 

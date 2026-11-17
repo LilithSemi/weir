@@ -288,6 +288,12 @@ pub fn build(b: *std.Build) void {
     });
     update_test_mod.addImport("conduit", conduit_host);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = update_test_mod })).step);
+    const sd_trace_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/drivers/sd_trace.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = sd_trace_test_mod })).step);
     const copy_mem_test_mod = b.createModule(.{
         .root_source_file = b.path("src/uefi/copy_mem.zig"),
         .target = b.graph.host,

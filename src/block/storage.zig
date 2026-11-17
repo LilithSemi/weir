@@ -109,6 +109,13 @@ fn append(dev_kind: Kind, dev: block.Device, base: u64, info: Info) void {
     count_v += 1;
 }
 
+/// Discover every block device again. A device list from before this call is
+/// not valid after it.
+pub fn rescan() bool {
+    inited = false;
+    return init();
+}
+
 /// Discover every block device, in boot order. Returns true if the platform has
 /// at least one. Idempotent: the first call probes, later calls reuse the list.
 pub fn init() bool {

@@ -28,7 +28,19 @@ const info_entry_len = 14;
 const request_magic = [2]u8{ 'W', 'U' };
 const reply_magic = [2]u8{ 'w', 'u' };
 
-pub const Command = enum(u8) { ping = 0, info = 1, write = 2, crc = 3, baud = 4, boot = 5, _ };
+pub const Command = enum(u8) { ping = 0, info = 1, write = 2, crc = 3, baud = 4, boot = 5, rescan = 6, probe = 7, _ };
+
+/// Board services for the rescan and probe commands. A command with no
+/// service gets the unknown command status.
+pub fn Hooks(comptime Entry: type) type {
+    return struct {
+        /// Finds the block devices again and gives the new list.
+        rescan: ?*const fn () []const Entry = null,
+        /// Traces the bring-up of SD host `index` into `out`. It gives the
+        /// number of bytes, or null when the host does not exist.
+        probe: ?*const fn (index: u8, out: []u8) ?usize = null,
+    };
+}
 
 pub const Status = enum(u8) {
     ok = 0,
@@ -62,6 +74,7 @@ pub fn Engine(comptime Transport: type, comptime Entry: type) type {
 
         transport: *Transport,
         devices: []const Entry,
+        hooks: Hooks(Entry) = .{},
         rate: u32 = default_baud,
 
         /// Handles requests until the boot command, then returns. The UART is
@@ -93,9 +106,29 @@ pub fn Engine(comptime Transport: type, comptime Entry: type) type {
                     if (self.rate != default_baud) _ = self.transport.setBaud(default_baud);
                     return true;
                 },
+                .rescan => self.rescan(req),
+                .probe => self.probe(req),
                 _ => self.reply(.unknown_command, req.seq, 0),
             }
             return false;
+        }
+
+        fn rescan(self: *Self, req: Request) void {
+            const service = self.hooks.rescan orelse return self.reply(.unknown_command, req.seq, 0);
+            if (req.payload.len != 0) return self.reply(.bad_argument, req.seq, 0);
+            self.devices = service();
+            frame[header_len] = @intCast(@min(self.devices.len, 255));
+            self.reply(.ok, req.seq, 1);
+        }
+
+        fn probe(self: *Self, req: Request) void {
+            const service = self.hooks.probe orelse return self.reply(.unknown_command, req.seq, 0);
+            if (req.payload.len != 1) return self.reply(.bad_argument, req.seq, 0);
+            // The reply payload goes where the request payload is.
+            const index = req.payload[0];
+            const len = service(index, frame[header_len..][0..max_payload]) orelse
+                return self.reply(.bad_argument, req.seq, 0);
+            self.reply(.ok, req.seq, @intCast(len));
         }
 
         fn info(self: *Self, req: Request) void {
@@ -742,4 +775,65 @@ test "boot with a payload gets bad argument and does not end the engine" {
     script.boot(2);
     try rig.run(&script, 3);
     try rig.expectReplies(&.{ .{ @backingInt(Status.bad_argument), 1 }, .{ ok, 2 } });
+}
+
+test "rescan and probe get unknown command with no service" {
+    var disks: [3]Disk = @splat(.{});
+    var rig = testRig(&disks);
+    var script: Script = .{};
+    script.request(@backingInt(Command.rescan), 1, &.{});
+    script.request(@backingInt(Command.probe), 2, &.{0});
+    script.boot(3);
+    try rig.run(&script, 3);
+    const unknown = @backingInt(Status.unknown_command);
+    try rig.expectReplies(&.{ .{ unknown, 1 }, .{ unknown, 2 }, .{ ok, 3 } });
+}
+
+const HookRig = struct {
+    var entries: [3]TestEntry = undefined;
+    var found: usize = 0;
+
+    fn rescan() []const TestEntry {
+        return entries[0..found];
+    }
+
+    fn probe(index: u8, out: []u8) ?usize {
+        if (index != 0) return null;
+        @memcpy(out[0..4], "trac");
+        return 4;
+    }
+};
+
+test "rescan takes the new device list, and probe gives the trace of a host" {
+    var disks: [3]Disk = @splat(.{});
+    var rig = testRig(&disks);
+    HookRig.entries = rig.entries;
+    HookRig.found = 2;
+    var script: Script = .{};
+    var buf: [max_payload]u8 = undefined;
+    const args = writeArgs(&buf, 0, 7, 1, 0x5a);
+    script.request(@backingInt(Command.info), 1, &.{});
+    script.request(@backingInt(Command.rescan), 2, &.{});
+    script.request(cmd_write, 3, args);
+    script.request(@backingInt(Command.rescan), 4, &.{1});
+    script.request(@backingInt(Command.probe), 5, &.{0});
+    script.request(@backingInt(Command.probe), 6, &.{1});
+    script.request(@backingInt(Command.probe), 7, &.{});
+    script.boot(8);
+
+    rig.link = .{ .input = script.bytes[0..script.len] };
+    var engine: Engine(FakeLink, TestEntry) = .{
+        .transport = &rig.link,
+        .devices = rig.entries[0..0],
+        .hooks = .{ .rescan = HookRig.rescan, .probe = HookRig.probe },
+    };
+    engine.run();
+    try rig.parse();
+
+    const bad = @backingInt(Status.bad_argument);
+    try rig.expectReplies(&.{ .{ ok, 1 }, .{ ok, 2 }, .{ ok, 3 }, .{ bad, 4 }, .{ ok, 5 }, .{ bad, 6 }, .{ bad, 7 }, .{ ok, 8 } });
+    try testing.expectEqual(0, rig.replies[0].payload[2]);
+    try testing.expectEqualSlices(u8, &.{2}, rig.replies[1].payload);
+    try testing.expectEqualSlices(u8, args[write_args_len..], &disks[0].blocks[7]);
+    try testing.expectEqualSlices(u8, "trac", rig.replies[4].payload);
 }
