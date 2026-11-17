@@ -34,7 +34,8 @@ An absent class turns its feature off or falls back to a default.
 The CLINT `mtime` runs at the timer's `clock-frequency`. The software wall clock
 uses this rate to count seconds when the board has no RTC. Weir defaults to 10
 MHz, the QEMU rate, when the tree omits it. The UART baud divisor comes from the
-UART node's `clock-frequency` the same way.
+UART node's `clock-frequency` the same way. The UART is a 16550, so the divisor
+is the clock divided by 16 times the baud.
 
 ## Flash partitions
 

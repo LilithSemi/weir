@@ -94,11 +94,21 @@ const sdhci_ids = [_][]const u8{ "harbor,sdhci", "harbor,sdio" };
 const virtio_ids = [_][]const u8{"virtio,mmio"};
 
 pub const uart_base: usize = if (firstMmio(.uart)) |r| @intCast(r.base) else 0x10000000;
-// The UART's own baud clock, which console.zig divides to get the divisor. This
+// The UART's own baud clock, which `uartDivisor` divides. This
 // one IS a device clock, so the node's `clock-frequency` is the right source.
 // The default is a guess for a tree that omits it, and a guess here sets every
 // baud rate wrong. A board declares the rate instead of relying on it.
 pub const uart_clock: usize = if (firstClockHz(.uart)) |hz| @intCast(hz) else 24000000;
+
+/// The 16550 divisor latch value for `baud`. The UART sends at the clock divided
+/// by 16 and by the divisor. Null when the nearest divisor is 0 or over 0xffff.
+pub fn uartDivisor(baud: u32) ?u16 {
+    if (baud == 0) return null;
+    const step = 16 * @as(u64, baud);
+    const div = (uart_clock + step / 2) / step;
+    if (div == 0 or div > 0xffff) return null;
+    return @intCast(div);
+}
 pub const clint_base: usize = if (firstMmio(.timer)) |r| @intCast(r.base) else 0x2000000;
 
 /// The architectural timebase: the rate the RISC-V `time` counter (CLINT mtime)
@@ -630,6 +640,15 @@ test "a native SD host declares its own input clock" {
     if (sdhci_count == 0) return error.SkipZigTest;
     const declared = firstClockHzId(.block, &sdhci_ids) orelse return error.SdHostHasNoClock;
     try std.testing.expectEqual(declared, @as(u64, sdhci_freq));
+}
+
+test "the uart divisor counts 16 clocks for each bit" {
+    const step = 16 * @as(u64, 115200);
+    const want = (uart_clock + step / 2) / step;
+    if (want == 0 or want > 0xffff) return error.SkipZigTest;
+    try std.testing.expectEqual(@as(?u16, @intCast(want)), uartDivisor(115200));
+    try std.testing.expectEqual(@as(?u16, null), uartDivisor(0));
+    try std.testing.expectEqual(@as(?u16, null), uartDivisor(std.math.maxInt(u32)));
 }
 
 test "the uart clock comes from the uart node, not from a default" {

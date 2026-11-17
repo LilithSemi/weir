@@ -166,8 +166,10 @@ driver, so send `rescan` before the next `write` or `crc`.
 ## Baud rate
 
 Weir sends the reply to `baud` at the old rate and waits until the transmitter
-is empty. Then it changes the rate. The divisor is the UART clock divided by the
-baud. A divisor of 0 or over 0xffff gets status 3, and the rate does not change.
+is empty. Then it changes the rate. The divisor is the UART clock divided by 16
+times the baud, to the nearest integer. A divisor of 0 or over 0xffff gets
+status 3, and the rate does not change. The real rate is the UART clock divided
+by 16 times the divisor, so a baud that is not near such a rate does not work.
 
 After the change, the host must send a ping at the new rate within 2 seconds and
 receive the reply. If no ping arrives in that time, Weir goes back to 115200.

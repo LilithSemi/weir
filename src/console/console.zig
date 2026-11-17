@@ -39,12 +39,15 @@ pub const err: *std.Io.Writer = &ws_err.interface;
 /// only after `init`.
 pub const input: *std.Io.Reader = &ws_in.interface;
 
+const default_divisor: u16 = soc.uartDivisor(115200) orelse
+    @compileError("the UART clock is too low for 115200 baud");
+
 pub fn init() void {
-    // River gates TX on a nonzero divisor, where baud = clock / divisor. It also
-    // stalls on FCR/MCR writes, so bind with minimal_init. QEMU virt ignores the
-    // divisor and accepts the full init, so this path serves both.
+    // River sends nothing while the divisor is 0. It also stalls on FCR/MCR
+    // writes, so bind with minimal_init. QEMU virt ignores the divisor and
+    // accepts the full init, so this path serves both.
     dev = conduit.driver.ns16550a.bind(conduit.Mmio.direct(platform.uartBase()), .{
-        .divisor = @intCast(soc.uart_clock / 115200),
+        .divisor = default_divisor,
         .minimal_init = true,
     });
     ws_out = dev.serial().writer(&out_buf);
@@ -72,12 +75,9 @@ pub fn txEmpty() bool {
     return dev.mmio.read(u8, lsr) & lsr_temt != 0;
 }
 
-/// The divisor for `baud`, or null when the divisor is 0 or over 0xffff.
+/// The divisor for `baud`, or null when no divisor fits.
 pub fn divisorFor(baud: u32) ?u16 {
-    if (baud == 0) return null;
-    const div = soc.uart_clock / baud;
-    if (div == 0 or div > 0xffff) return null;
-    return @intCast(div);
+    return soc.uartDivisor(baud);
 }
 
 /// Programs a new rate with the same minimal init as `init`. Returns false and

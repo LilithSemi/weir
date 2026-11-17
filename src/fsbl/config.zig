@@ -8,9 +8,10 @@ const soc = @import("soc");
 /// UART base for early FSBL logging (no DTB parsed at runtime yet at this stage).
 pub const uart_base: usize = soc.uart_base;
 
-/// Baud divisor for 115200: River/Harbor's UART gates TX on a nonzero divisor
-/// (baud = clock/divisor), so the FSBL must program it before its first print.
-pub const uart_divisor: u16 = @intCast(soc.uart_clock / 115200);
+/// Baud divisor for 115200. The Harbor UART sends nothing while the divisor is
+/// 0, so the FSBL must program it before its first print.
+pub const uart_divisor: u16 = soc.uartDivisor(115200) orelse
+    @compileError("the UART clock is too low for 115200 baud");
 
 /// Where the main Weir image runs from once DRAM is up (its link base).
 pub const dram_base: usize = soc.ram_base;
