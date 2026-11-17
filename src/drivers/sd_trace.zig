@@ -41,6 +41,7 @@ const int_all: u32 = 0xff;
 const resp_none = 0;
 const resp_short = 1;
 const resp_long = 2;
+const resp_busy = 3;
 
 const init_hz = 400_000;
 const busy_polls = 4_000_000;
@@ -64,12 +65,25 @@ const max_status_polls = 20000;
 /// is the offset of the first byte that differs.
 pub const compare_opcode = 0xfe;
 
+/// The opcode of the last record of a read trace. Its count is the number of
+/// blocks, and its response is the CRC-32 of the data.
+pub const data_opcode = 0xfd;
+pub const max_read_blocks = 8;
+
 pub const WriteArgs = struct {
     rca: u32,
     /// The block number, or the byte offset for a standard capacity card.
     card_addr: u32,
     write_addr: u32,
     read_addr: u32,
+};
+
+pub const ReadArgs = struct {
+    rca: u32,
+    card_addr: u32,
+    read_addr: u32,
+    /// 0 sends no read. The trace then has the card status and a stop only.
+    count: u8,
 };
 
 /// Register access at a fixed base address.
@@ -152,6 +166,26 @@ pub fn Tracer(comptime Bus: type) type {
             self.bus.write(blk_size, 512);
             self.bus.write(blk_count, 1);
             _ = self.commandFlags(17, args.card_addr, resp_short, flag_data | flag_read | flag_dma, 0);
+            _ = self.command(send_status, args.rca << 16, resp_short, 0);
+            return self.len;
+        }
+
+        /// Reads `args.count` blocks to memory at `args.read_addr`, with the
+        /// card status before and after. One block uses command 17. More
+        /// blocks use command 18, then command 12. A count of 0 sends the
+        /// status, a stop and the status again. It returns the number of
+        /// bytes written to `out`.
+        pub fn runRead(self: *Self, args: ReadArgs) usize {
+            self.record(state_opcode, .ok, 0, 0);
+            _ = self.command(send_status, args.rca << 16, resp_short, 0);
+            if (args.count > 0) {
+                self.bus.write(adma_addr, args.read_addr);
+                self.bus.write(blk_size, 512);
+                self.bus.write(blk_count, args.count);
+                const opcode: u8 = if (args.count == 1) 17 else 18;
+                _ = self.commandFlags(opcode, args.card_addr, resp_short, flag_data | flag_read | flag_dma, args.count);
+            }
+            if (args.count != 1) _ = self.command(12, 0, resp_busy, 0);
             _ = self.command(send_status, args.rca << 16, resp_short, 0);
             return self.len;
         }
@@ -257,6 +291,30 @@ pub fn runWrite(base: usize, rca: u32, card_addr: u32, data: *const [512]u8, out
     at[0] = compare_opcode;
     std.mem.writeInt(u16, at[2..4], @intFromBool(differ == null), .little);
     std.mem.writeInt(u32, at[8..12], @intCast(differ orelse 0), .little);
+    return len + record_len;
+}
+
+var read_blocks: [max_read_blocks * 512]u8 align(64) = @splat(0);
+
+/// Reads `count` blocks from the card on the host at `base` and traces each
+/// step. `count` is at most max_read_blocks. It returns the number of bytes
+/// written to `out`, or null when the buffer is above 4 GiB.
+pub fn runRead(base: usize, rca: u32, card_addr: u32, count: u8, out: []u8) ?usize {
+    std.debug.assert(count <= max_read_blocks);
+    const read_addr = std.math.cast(u32, @intFromPtr(&read_blocks)) orelse return null;
+    @memset(&read_blocks, 0);
+    syncMemory();
+
+    var tracer: Tracer(Mmio) = .{ .bus = .{ .base = base }, .out = out };
+    const len = tracer.runRead(.{ .rca = rca, .card_addr = card_addr, .read_addr = read_addr, .count = count });
+
+    syncMemory();
+    if (len + record_len > out.len) return len;
+    const at = out[len..][0..record_len];
+    @memset(at, 0);
+    at[0] = data_opcode;
+    std.mem.writeInt(u16, at[2..4], count, .little);
+    std.mem.writeInt(u32, at[8..12], std.hash.Crc32.hash(read_blocks[0 .. @as(usize, count) * 512]), .little);
     return len + record_len;
 }
 
@@ -510,4 +568,29 @@ test "a card that stays in the programming state ends the trace at the poll limi
     try testing.expectEqual(5 * record_len, len);
     try testing.expectEqual(@as(u32, 0xe00), recordAt(&out, 4).resp);
     try testing.expectEqual(@as(u16, 50), recordAt(&out, 4).count);
+}
+
+test "a read trace uses command 17 for one block and commands 18 and 12 for more" {
+    var one: WriteModel = .{};
+    var out: [16 * record_len]u8 = undefined;
+    var tracer: Tracer(*WriteModel) = .{ .bus = &one, .out = &out, .busy_limit = 4 };
+    try testing.expectEqual(4 * record_len, tracer.runRead(.{ .rca = 0xaaaa, .card_addr = 7, .read_addr = 0x8010_0000, .count = 1 }));
+    for ([_]u8{ state_opcode, 13, 17, 13 }, 0..) |opcode, i| try testing.expectEqual(opcode, recordAt(&out, i).opcode);
+    try testing.expectEqualSlices(u32, &.{17 | (1 << 6) | flag_data | flag_read | flag_dma}, one.commands[0..one.command_count]);
+
+    var many: WriteModel = .{};
+    tracer = .{ .bus = &many, .out = &out, .busy_limit = 4 };
+    try testing.expectEqual(5 * record_len, tracer.runRead(.{ .rca = 0xaaaa, .card_addr = 7, .read_addr = 0x8010_0000, .count = 8 }));
+    for ([_]u8{ state_opcode, 13, 18, 12, 13 }, 0..) |opcode, i| try testing.expectEqual(opcode, recordAt(&out, i).opcode);
+    try testing.expectEqual(@as(u16, 8), recordAt(&out, 2).count);
+    try testing.expectEqualSlices(u32, &.{ 18 | (1 << 6) | flag_data | flag_read | flag_dma, 12 | (3 << 6) }, many.commands[0..many.command_count]);
+}
+
+test "a read trace with a count of 0 sends the status, a stop and the status" {
+    var model: WriteModel = .{};
+    var out: [16 * record_len]u8 = undefined;
+    var tracer: Tracer(*WriteModel) = .{ .bus = &model, .out = &out, .busy_limit = 4 };
+    try testing.expectEqual(4 * record_len, tracer.runRead(.{ .rca = 0xaaaa, .card_addr = 7, .read_addr = 0x8010_0000, .count = 0 }));
+    for ([_]u8{ state_opcode, 13, 12, 13 }, 0..) |opcode, i| try testing.expectEqual(opcode, recordAt(&out, i).opcode);
+    try testing.expectEqualSlices(u32, &.{12 | (3 << 6)}, model.commands[0..model.command_count]);
 }

@@ -517,7 +517,12 @@ fn serialUpdate() void {
     var engine: update_serial.Engine(update_uart.Transport, storage.Device) = .{
         .transport = &link,
         .devices = storage.devices(),
-        .hooks = .{ .rescan = rescanStorage, .probe = traceSdHost, .write_trace = traceSdWrite },
+        .hooks = .{
+            .rescan = rescanStorage,
+            .probe = traceSdHost,
+            .write_trace = traceSdWrite,
+            .read_trace = traceSdRead,
+        },
     };
     engine.run();
 }
@@ -533,13 +538,27 @@ fn traceSdHost(index: u8, out: []u8) ?usize {
     return sd_trace.run(hosts[index].base, hosts[index].freq, out);
 }
 
-fn traceSdWrite(index: u8, lba: u64, data: *const [512]u8, out: []u8) ?usize {
+const SdTarget = struct { base: usize, rca: u32, card_addr: u32 };
+
+// The card data comes from the last bring-up, so a trace also reaches a card
+// that stopped after it.
+fn sdTarget(index: u8, lba: u64) ?SdTarget {
     const hosts = platform.sdhciControllers();
     if (index >= hosts.len) return null;
     const card = @import("drivers/sdhci.zig").cardAddress(index) orelse return null;
     const unit: u64 = if (card.high_capacity) 1 else 512;
     const card_addr = std.math.cast(u32, std.math.mul(u64, lba, unit) catch return null) orelse return null;
-    return sd_trace.runWrite(hosts[index].base, card.rca, card_addr, data, out);
+    return .{ .base = hosts[index].base, .rca = card.rca, .card_addr = card_addr };
+}
+
+fn traceSdWrite(index: u8, lba: u64, data: *const [512]u8, out: []u8) ?usize {
+    const target = sdTarget(index, lba) orelse return null;
+    return sd_trace.runWrite(target.base, target.rca, target.card_addr, data, out);
+}
+
+fn traceSdRead(index: u8, lba: u64, count: u8, out: []u8) ?usize {
+    const target = sdTarget(index, lba) orelse return null;
+    return sd_trace.runRead(target.base, target.rca, target.card_addr, count, out);
 }
 
 /// Resolve the S-mode handoff, either a UEFI app under an EFI System Table or

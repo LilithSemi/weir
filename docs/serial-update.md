@@ -64,6 +64,7 @@ Two rules keep the host and Weir in step after an error:
 | 6 | rescan | none | device count u8 |
 | 7 | probe | SD host u8 | trace records, see below |
 | 8 | write trace | SD host u8, lba u64, count u8 (1), then 512 data bytes | trace records, see below |
+| 9 | read trace | SD host u8, lba u64, count u8 (0 to 8) | trace records, see below |
 
 The info reply has the version u8 (1), the maximum blocks for one write u8 (8)
 and the device count u8. Then for each device it has:
@@ -122,6 +123,23 @@ after a write. The steps are:
 
 When the card does not become ready, the trace has no read, and the last record
 compares the data with zeros.
+
+`read trace` reads blocks from the card on one SD host, without the block
+driver. The steps are:
+
+1. The controller state (opcode 0xff).
+2. Command 13, the card status before the read.
+3. For 1 block, command 17. For 2 to 8 blocks, command 18, then command 12.
+4. Command 13, the card status after the read.
+5. A record with opcode 0xfd. Its count is the number of blocks, and its
+   response field is the CRC-32 of the data.
+
+With a count of 0 the trace sends no read. It sends command 13, command 12 and
+command 13. Use it after a failed transfer to see if the card still answers,
+before a `rescan` or a `probe`. Those send command 0, and the traces do not.
+
+The two traces use the card address from the last time the storage was found,
+so they also work when the card stopped after that.
 
 ## Status codes
 

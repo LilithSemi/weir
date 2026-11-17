@@ -28,10 +28,12 @@ const info_entry_len = 14;
 const request_magic = [2]u8{ 'W', 'U' };
 const reply_magic = [2]u8{ 'w', 'u' };
 
-pub const Command = enum(u8) { ping = 0, info = 1, write = 2, crc = 3, baud = 4, boot = 5, rescan = 6, probe = 7, write_trace = 8, _ };
+pub const Command = enum(u8) { ping = 0, info = 1, write = 2, crc = 3, baud = 4, boot = 5, rescan = 6, probe = 7, write_trace = 8, read_trace = 9, _ };
 
-/// Board services for the rescan, probe and write trace commands. A command
-/// with no service gets the unknown command status.
+pub const max_trace_blocks = 8;
+
+/// Board services for the rescan, probe and trace commands. A command with no
+/// service gets the unknown command status.
 pub fn Hooks(comptime Entry: type) type {
     return struct {
         /// Finds the block devices again and gives the new list.
@@ -43,6 +45,11 @@ pub fn Hooks(comptime Entry: type) type {
         /// step into `out`, which can overlap `data`. It gives the number of
         /// bytes, or null when the host has no card or `lba` is out of range.
         write_trace: ?*const fn (index: u8, lba: u64, data: *const [block_size]u8, out: []u8) ?usize = null,
+        /// Reads `count` blocks, max_trace_blocks at most, from the card on
+        /// SD host `index` and traces each step into `out`. It gives the
+        /// number of bytes, or null when the host has no card or `lba` is out
+        /// of range.
+        read_trace: ?*const fn (index: u8, lba: u64, count: u8, out: []u8) ?usize = null,
     };
 }
 
@@ -113,6 +120,7 @@ pub fn Engine(comptime Transport: type, comptime Entry: type) type {
                 .rescan => self.rescan(req),
                 .probe => self.probe(req),
                 .write_trace => self.writeTrace(req),
+                .read_trace => self.readTrace(req),
                 _ => self.reply(.unknown_command, req.seq, 0),
             }
             return false;
@@ -145,6 +153,19 @@ pub fn Engine(comptime Transport: type, comptime Entry: type) type {
             const lba = std.mem.readInt(u64, args[1..9], .little);
             const data = args[write_args_len..][0..block_size];
             const len = service(index, lba, data, frame[header_len..][0..max_payload]) orelse
+                return self.reply(.bad_argument, req.seq, 0);
+            self.reply(.ok, req.seq, @intCast(len));
+        }
+
+        // The request has the arguments of a write and no data.
+        fn readTrace(self: *Self, req: Request) void {
+            const service = self.hooks.read_trace orelse return self.reply(.unknown_command, req.seq, 0);
+            const args = req.payload;
+            if (args.len != write_args_len or args[9] > max_trace_blocks) return self.reply(.bad_argument, req.seq, 0);
+            const index = args[0];
+            const lba = std.mem.readInt(u64, args[1..9], .little);
+            const count = args[9];
+            const len = service(index, lba, count, frame[header_len..][0..max_payload]) orelse
                 return self.reply(.bad_argument, req.seq, 0);
             self.reply(.ok, req.seq, @intCast(len));
         }
@@ -900,4 +921,49 @@ test "write trace takes one block in the layout of a write and gives the records
     try testing.expectEqualSlices(u8, &@as([32]u8, @splat(0xee)), rig.replies[0].payload);
     // The disks of the block layer get no write from a trace.
     try testing.expectEqualSlices(u8, &@as([block_size]u8, @splat(0)), &disks[0].blocks[5]);
+}
+
+const ReadTraceRig = struct {
+    var seen: [3]u64 = @splat(0);
+
+    fn readTrace(index: u8, lba: u64, count: u8, out: []u8) ?usize {
+        if (index != 0) return null;
+        seen = .{ index, lba, count };
+        @memset(out[0..16], 0xdd);
+        return 16;
+    }
+};
+
+test "read trace takes a host, an lba and a count of 0 to 8" {
+    var disks: [3]Disk = @splat(.{});
+    var rig = testRig(&disks);
+    var script: Script = .{};
+    var args: [4][write_args_len]u8 = undefined;
+    const cmd = @backingInt(Command.read_trace);
+    script.request(cmd, 1, traceArgs(&args[0], 0, 4096, 0));
+    script.request(cmd, 2, traceArgs(&args[1], 0, 9, 9));
+    script.request(cmd, 3, traceArgs(&args[2], 1, 9, 0));
+    script.request(cmd, 4, &.{ 0, 0 });
+    script.boot(5);
+
+    rig.link = .{ .input = script.bytes[0..script.len] };
+    var engine: Engine(FakeLink, TestEntry) = .{
+        .transport = &rig.link,
+        .devices = rig.entries[0..3],
+        .hooks = .{ .read_trace = ReadTraceRig.readTrace },
+    };
+    engine.run();
+    try rig.parse();
+
+    const bad = @backingInt(Status.bad_argument);
+    try rig.expectReplies(&.{ .{ ok, 1 }, .{ bad, 2 }, .{ bad, 3 }, .{ bad, 4 }, .{ ok, 5 } });
+    try testing.expectEqualSlices(u64, &.{ 0, 4096, 0 }, &ReadTraceRig.seen);
+    try testing.expectEqualSlices(u8, &@as([16]u8, @splat(0xdd)), rig.replies[0].payload);
+}
+
+fn traceArgs(buf: *[write_args_len]u8, host: u8, lba: u64, count: u8) []const u8 {
+    buf[0] = host;
+    std.mem.writeInt(u64, buf[1..9], lba, .little);
+    buf[9] = count;
+    return buf;
 }
