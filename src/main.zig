@@ -517,7 +517,7 @@ fn serialUpdate() void {
     var engine: update_serial.Engine(update_uart.Transport, storage.Device) = .{
         .transport = &link,
         .devices = storage.devices(),
-        .hooks = .{ .rescan = rescanStorage, .probe = traceSdHost },
+        .hooks = .{ .rescan = rescanStorage, .probe = traceSdHost, .write_trace = traceSdWrite },
     };
     engine.run();
 }
@@ -531,6 +531,15 @@ fn traceSdHost(index: u8, out: []u8) ?usize {
     const hosts = platform.sdhciControllers();
     if (index >= hosts.len) return null;
     return sd_trace.run(hosts[index].base, hosts[index].freq, out);
+}
+
+fn traceSdWrite(index: u8, lba: u64, data: *const [512]u8, out: []u8) ?usize {
+    const hosts = platform.sdhciControllers();
+    if (index >= hosts.len) return null;
+    const card = @import("drivers/sdhci.zig").cardAddress(index) orelse return null;
+    const unit: u64 = if (card.high_capacity) 1 else 512;
+    const card_addr = std.math.cast(u32, std.math.mul(u64, lba, unit) catch return null) orelse return null;
+    return sd_trace.runWrite(hosts[index].base, card.rca, card_addr, data, out);
 }
 
 /// Resolve the S-mode handoff, either a UEFI app under an EFI System Table or

@@ -35,3 +35,13 @@ pub fn cardPresent(idx: usize) bool {
 pub fn cidInfo(idx: usize) Cid {
     return devs[idx].cidInfo();
 }
+
+/// How to address the card on host `idx`.
+pub const CardAddress = struct { rca: u32, high_capacity: bool };
+
+/// The address data from bring-up, or null when the host has no card.
+pub fn cardAddress(idx: usize) ?CardAddress {
+    if (soc.sdhci_count == 0) return null;
+    if (!devs[idx].cardPresent()) return null;
+    return .{ .rca = devs[idx].rca, .high_capacity = devs[idx].high_capacity };
+}

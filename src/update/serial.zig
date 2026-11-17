@@ -28,10 +28,10 @@ const info_entry_len = 14;
 const request_magic = [2]u8{ 'W', 'U' };
 const reply_magic = [2]u8{ 'w', 'u' };
 
-pub const Command = enum(u8) { ping = 0, info = 1, write = 2, crc = 3, baud = 4, boot = 5, rescan = 6, probe = 7, _ };
+pub const Command = enum(u8) { ping = 0, info = 1, write = 2, crc = 3, baud = 4, boot = 5, rescan = 6, probe = 7, write_trace = 8, _ };
 
-/// Board services for the rescan and probe commands. A command with no
-/// service gets the unknown command status.
+/// Board services for the rescan, probe and write trace commands. A command
+/// with no service gets the unknown command status.
 pub fn Hooks(comptime Entry: type) type {
     return struct {
         /// Finds the block devices again and gives the new list.
@@ -39,6 +39,10 @@ pub fn Hooks(comptime Entry: type) type {
         /// Traces the bring-up of SD host `index` into `out`. It gives the
         /// number of bytes, or null when the host does not exist.
         probe: ?*const fn (index: u8, out: []u8) ?usize = null,
+        /// Writes one block to the card on SD host `index` and traces each
+        /// step into `out`, which can overlap `data`. It gives the number of
+        /// bytes, or null when the host has no card or `lba` is out of range.
+        write_trace: ?*const fn (index: u8, lba: u64, data: *const [block_size]u8, out: []u8) ?usize = null,
     };
 }
 
@@ -108,6 +112,7 @@ pub fn Engine(comptime Transport: type, comptime Entry: type) type {
                 },
                 .rescan => self.rescan(req),
                 .probe => self.probe(req),
+                .write_trace => self.writeTrace(req),
                 _ => self.reply(.unknown_command, req.seq, 0),
             }
             return false;
@@ -127,6 +132,19 @@ pub fn Engine(comptime Transport: type, comptime Entry: type) type {
             // The reply payload goes where the request payload is.
             const index = req.payload[0];
             const len = service(index, frame[header_len..][0..max_payload]) orelse
+                return self.reply(.bad_argument, req.seq, 0);
+            self.reply(.ok, req.seq, @intCast(len));
+        }
+
+        // The request has the layout of a write of one block.
+        fn writeTrace(self: *Self, req: Request) void {
+            const service = self.hooks.write_trace orelse return self.reply(.unknown_command, req.seq, 0);
+            const args = req.payload;
+            if (args.len != write_args_len + block_size or args[9] != 1) return self.reply(.bad_argument, req.seq, 0);
+            const index = args[0];
+            const lba = std.mem.readInt(u64, args[1..9], .little);
+            const data = args[write_args_len..][0..block_size];
+            const len = service(index, lba, data, frame[header_len..][0..max_payload]) orelse
                 return self.reply(.bad_argument, req.seq, 0);
             self.reply(.ok, req.seq, @intCast(len));
         }
@@ -836,4 +854,50 @@ test "rescan takes the new device list, and probe gives the trace of a host" {
     try testing.expectEqualSlices(u8, &.{2}, rig.replies[1].payload);
     try testing.expectEqualSlices(u8, args[write_args_len..], &disks[0].blocks[7]);
     try testing.expectEqualSlices(u8, "trac", rig.replies[4].payload);
+}
+
+const TraceRig = struct {
+    var seen_lba: u64 = 0;
+    var seen_first: u8 = 0;
+
+    fn writeTrace(index: u8, lba: u64, data: *const [block_size]u8, out: []u8) ?usize {
+        if (index != 0) return null;
+        seen_lba = lba;
+        seen_first = data[0];
+        // The service can use the memory of the request.
+        @memset(out[0..32], 0xee);
+        return 32;
+    }
+};
+
+test "write trace takes one block in the layout of a write and gives the records" {
+    var disks: [3]Disk = @splat(.{});
+    var rig = testRig(&disks);
+    var script: Script = .{};
+    var one: [max_payload]u8 = undefined;
+    var other: [max_payload]u8 = undefined;
+    var two: [max_payload]u8 = undefined;
+    const cmd = @backingInt(Command.write_trace);
+    script.request(cmd, 1, writeArgs(&one, 0, 2_000_000, 1, 0x33));
+    script.request(cmd, 2, writeArgs(&other, 1, 5, 1, 0x44));
+    script.request(cmd, 3, writeArgs(&two, 0, 5, 2, 0x55));
+    script.request(cmd, 4, &.{0});
+    script.boot(5);
+
+    rig.link = .{ .input = script.bytes[0..script.len] };
+    var engine: Engine(FakeLink, TestEntry) = .{
+        .transport = &rig.link,
+        .devices = rig.entries[0..3],
+        .hooks = .{ .write_trace = TraceRig.writeTrace },
+    };
+    engine.run();
+    try rig.parse();
+
+    const bad = @backingInt(Status.bad_argument);
+    try rig.expectReplies(&.{ .{ ok, 1 }, .{ bad, 2 }, .{ bad, 3 }, .{ bad, 4 }, .{ ok, 5 } });
+    try testing.expectEqual(2_000_000, TraceRig.seen_lba);
+    try testing.expectEqual(0x33, TraceRig.seen_first);
+    try testing.expectEqualSlices(u8, &@as([32]u8, @splat(0xee)), rig.replies[0].payload);
+    // The disks of the block layer get no write from a trace.
+    try testing.expectEqualSlices(u8, &@as([block_size]u8, @splat(0)), &disks[0].blocks[5]);
 }
