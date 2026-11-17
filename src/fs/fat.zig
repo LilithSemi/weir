@@ -7,6 +7,8 @@ const fs = @import("fs.zig");
 
 const Type = enum { fat12, fat16, fat32 };
 
+// Sector counts are in 512-byte device blocks. mount() converts them from the
+// logical sectors of the volume, so the reads need only one unit.
 const State = struct {
     // mount() sets part before any read. block.Partition.dev is a non-null
     // pointer, so zero-init would store an invalid device pointer.
@@ -83,6 +85,14 @@ fn nextCluster(s: *const State, cluster: u32) u32 {
     }
 }
 
+/// The number of 512-byte blocks in one logical sector, or null for a size that FAT does not permit.
+fn blocksPerSector(bytes_per_sector: u32) ?u32 {
+    return switch (bytes_per_sector) {
+        512, 1024, 2048, 4096 => bytes_per_sector / 512,
+        else => null,
+    };
+}
+
 /// Mount the partition. Returns an Fs handle or null.
 pub fn mount(part: block.Partition) ?fs.Fs {
     var bpb: [512]u8 = undefined;
@@ -90,24 +100,26 @@ pub fn mount(part: block.Partition) ?fs.Fs {
 
     var s = State{ .part = part };
     s.bytes_per_sector = std.mem.readInt(u16, bpb[11..13], .little);
-    s.sectors_per_cluster = bpb[13];
-    s.reserved = std.mem.readInt(u16, bpb[14..16], .little);
+    const scale = blocksPerSector(s.bytes_per_sector) orelse return null;
+    s.sectors_per_cluster = @as(u32, bpb[13]) * scale;
+    s.reserved = @as(u32, std.mem.readInt(u16, bpb[14..16], .little)) * scale;
     s.num_fats = bpb[16];
     const root_entries = std.mem.readInt(u16, bpb[17..19], .little);
     const total16 = std.mem.readInt(u16, bpb[19..21], .little);
     const fat16_size = std.mem.readInt(u16, bpb[22..24], .little);
     const total32 = std.mem.readInt(u32, bpb[32..36], .little);
-    if (s.bytes_per_sector != 512 or s.sectors_per_cluster == 0) return null;
+    if (s.sectors_per_cluster == 0) return null;
 
-    s.fat_sectors = if (fat16_size != 0) fat16_size else std.mem.readInt(u32, bpb[36..40], .little);
-    const total = if (total16 != 0) @as(u32, total16) else total32;
-    s.root_dir_sectors = (@as(u32, root_entries) * 32 + 511) / 512;
+    const fat_size = if (fat16_size != 0) fat16_size else std.mem.readInt(u32, bpb[36..40], .little);
+    s.fat_sectors = std.math.mul(u32, fat_size, scale) catch return null;
+    const total = std.math.mul(u32, if (total16 != 0) total16 else total32, scale) catch return null;
+    s.root_dir_sectors = std.mem.alignForward(u32, @as(u32, root_entries) * 32, s.bytes_per_sector) / 512;
     s.first_fat_sector = s.reserved;
-    s.first_data_sector = s.reserved + s.num_fats * s.fat_sectors + s.root_dir_sectors;
-    s.root_dir_start = s.reserved + s.num_fats * s.fat_sectors;
+    s.root_dir_start = std.math.add(u32, s.reserved, std.math.mul(u32, s.num_fats, s.fat_sectors) catch return null) catch return null;
+    s.first_data_sector = std.math.add(u32, s.root_dir_start, s.root_dir_sectors) catch return null;
     s.root_cluster = std.mem.readInt(u32, bpb[44..48], .little);
 
-    const data_sectors = total - s.first_data_sector;
+    const data_sectors = std.math.sub(u32, total, s.first_data_sector) catch return null;
     const clusters = data_sectors / s.sectors_per_cluster;
     // A zero 16-bit FAT size means FAT32 (it uses the 32-bit field). This is
     // reliable even for small volumes that the cluster-count rule would misjudge.

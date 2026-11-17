@@ -314,3 +314,110 @@ test "file read reports an intentionally short malformed FAT chain" {
     try checkChainBytes(out[0..got], &chain);
     try std.testing.expectEqual(@as(u8, 0xaa), out[got]);
 }
+
+fn fillBlocks(disk: *Disk, first_lba: u32, count: u32) void {
+    for (first_lba..first_lba + count) |lba| {
+        for (&disk.sectors[lba], 0..) |*byte, j| {
+            byte.* = @truncate(lba * 13 + j);
+        }
+    }
+}
+
+fn writeFileEntry(ent: []u8, cluster: u16, size: u32) void {
+    @memcpy(ent[0..11], "KERNEL  EFI");
+    ent[11] = 0x20;
+    write16(ent, 26, cluster);
+    write32(ent, 28, size);
+}
+
+fn wholeDisk(disk: *Disk) block.Partition {
+    disk.dev = disk.device();
+    return .{ .dev = &disk.dev, .base_lba = 0, .num_blocks = sector_count };
+}
+
+test "a fat32 volume with 4096 byte logical sectors reads a fragmented file" {
+    var disk = Disk{};
+    const bpb = &disk.sectors[0];
+    write16(bpb, 11, 4096);
+    bpb[13] = 1;
+    write16(bpb, 14, 1);
+    bpb[16] = 1;
+    write32(bpb, 32, sector_count / 8);
+    write32(bpb, 36, 1);
+    write32(bpb, 44, 2);
+
+    // One logical sector is 8 blocks: the FAT is at block 8, cluster 2 at block 16.
+    const fat_table = &disk.sectors[8];
+    write32(fat_table, 2 * 4, eoc);
+    write32(fat_table, 3 * 4, 5);
+    write32(fat_table, 5 * 4, eoc);
+    const size = 4096 + 100;
+    writeFileEntry(disk.sectors[16][0..32], 3, size);
+    fillBlocks(&disk, 24, 8);
+    fillBlocks(&disk, 40, 8);
+
+    const filesystem = fat.mount(wholeDisk(&disk)) orelse return error.MountFailed;
+    var out: [size]u8 = undefined;
+    try std.testing.expectEqual(@as(?usize, size), filesystem.readFile("KERNEL.EFI", &out));
+    try checkLbaBytes(out[0..4096], 0, 24);
+    try checkLbaBytes(out[4096..], 0, 40);
+}
+
+test "a fat12 volume with 2048 byte logical sectors rounds the root directory to a logical sector" {
+    var disk = Disk{};
+    const bpb = &disk.sectors[0];
+    write16(bpb, 11, 2048);
+    bpb[13] = 1;
+    write16(bpb, 14, 1);
+    bpb[16] = 1;
+    write16(bpb, 17, 16);
+    write16(bpb, 19, sector_count / 4);
+    write16(bpb, 22, 1);
+
+    // One logical sector is 4 blocks: the FAT is at block 4, the root directory
+    // at block 8, and cluster 2 at block 12. The chain is 3, 4.
+    const fat_table = &disk.sectors[4];
+    fat_table[4] = 0x40;
+    fat_table[5] = 0x00;
+    fat_table[6] = 0xff;
+    fat_table[7] = 0x0f;
+    const size = 2048 + 7;
+    writeFileEntry(disk.sectors[8][0..32], 3, size);
+    fillBlocks(&disk, 16, 8);
+
+    const filesystem = fat.mount(wholeDisk(&disk)) orelse return error.MountFailed;
+    var out: [size]u8 = undefined;
+    try std.testing.expectEqual(@as(?usize, size), filesystem.readFile("KERNEL.EFI", &out));
+    try checkLbaBytes(&out, 0, 16);
+}
+
+test "mount refuses a logical sector size that fat does not permit" {
+    for ([_]u16{ 0, 256, 1536, 8192 }) |bytes_per_sector| {
+        var disk = Disk{};
+        const bpb = &disk.sectors[0];
+        write16(bpb, 11, bytes_per_sector);
+        bpb[13] = 1;
+        write16(bpb, 14, 1);
+        bpb[16] = 1;
+        write32(bpb, 32, 16);
+        write32(bpb, 36, 1);
+        write32(bpb, 44, 2);
+        try std.testing.expect(fat.mount(wholeDisk(&disk)) == null);
+    }
+}
+
+test "mount refuses a volume whose areas do not fit its sector count" {
+    var disk = Disk{};
+    const bpb = &disk.sectors[0];
+    write16(bpb, 11, 4096);
+    bpb[13] = 1;
+    write16(bpb, 14, 1);
+    bpb[16] = 2;
+    write32(bpb, 32, 0xffff_ffff);
+    write32(bpb, 36, 0x4000_0000);
+    write32(bpb, 44, 2);
+    try std.testing.expect(fat.mount(wholeDisk(&disk)) == null);
+    write32(bpb, 32, 2);
+    write32(bpb, 36, 4);
+    try std.testing.expect(fat.mount(wholeDisk(&disk)) == null);
+}
