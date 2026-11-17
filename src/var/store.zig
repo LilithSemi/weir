@@ -131,7 +131,14 @@ pub fn init() void {
 
 fn initStore() void {
     switch (backend) {
-        .spi => flash = .{ .driver = .{ .bus = &spi_bus } },
+        .spi => {
+            flash = .{ .driver = .{ .bus = &spi_bus } };
+            switch (flash.driver.quadEnable()) {
+                .ok => {},
+                .failed => console.out.writeAll("[flash] quad enable failed. Reads use one data line\n") catch {},
+                .unknown_id => console.out.writeAll("[flash] unknown flash id. Reads use one data line\n") catch {},
+            }
+        },
         .cfi => {
             const bank = cfi.Bank.init(soc.cfi_vars_base.?) orelse return noFlash();
             console.out.print(

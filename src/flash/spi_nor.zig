@@ -20,7 +20,9 @@ pub const Regs = extern struct {
     status: u32,
     /// Bit N locks partition N. A write ORs into the mask.
     lock_mask: u32,
-    _reserved: [2]u32,
+    /// Bit 0 done, bit 1 quad enable set, bit 2 err, bit 3 the flash ID is not a known one.
+    qe_status: u32,
+    _reserved: u32,
     /// A read takes the claim if it is free and gives 1, else 0. A write of 1 releases it.
     claim: u32,
     _pad: [0x100 - 0x20]u8,
@@ -40,6 +42,11 @@ const ctrl_go: u32 = 1 << 31;
 const status_busy: u32 = 1 << 0;
 const status_done: u32 = 1 << 1;
 const status_err: u32 = 1 << 2;
+const qe_err: u32 = 1 << 2;
+const qe_unknown_id: u32 = 1 << 3;
+
+/// The result of the quad enable step that the controller does after reset.
+pub const QuadEnable = enum { ok, failed, unknown_id };
 
 pub const claim_retries = 100000;
 /// The engine has its own timeout and ends a healthy wait first.
@@ -106,6 +113,14 @@ pub fn Driver(comptime Bus: type) type {
 
         pub fn lockMask(self: *Self) u32 {
             return self.bus.read32(@offsetOf(Regs, "lock_mask"));
+        }
+
+        /// With a result other than `ok`, the controller reads the flash on one data line.
+        pub fn quadEnable(self: *Self) QuadEnable {
+            const status = self.bus.read32(@offsetOf(Regs, "qe_status"));
+            if (status & qe_unknown_id != 0) return .unknown_id;
+            if (status & qe_err != 0) return .failed;
+            return .ok;
         }
 
         fn programPage(self: *Self, off: u32, chunk: []const u8) bool {
@@ -176,6 +191,7 @@ const Model = struct {
     len: u32 = 0,
     status: u32 = 0,
     lock_mask: u32 = 0,
+    qe_status: u32 = 3,
     page: [64]u32 = @splat(0),
     claimed: bool = false,
     other_owner: bool = false,
@@ -198,6 +214,7 @@ const Model = struct {
                 return self.status;
             },
             @offsetOf(Regs, "lock_mask") => return self.lock_mask,
+            @offsetOf(Regs, "qe_status") => return self.qe_status,
             @offsetOf(Regs, "claim") => {
                 if (self.claimed or self.other_owner) return 0;
                 self.claimed = true;
@@ -285,6 +302,7 @@ test "Regs size and offsets" {
     try std.testing.expectEqual(0x00, @offsetOf(Regs, "ctrl"));
     try std.testing.expectEqual(0x0c, @offsetOf(Regs, "status"));
     try std.testing.expectEqual(0x10, @offsetOf(Regs, "lock_mask"));
+    try std.testing.expectEqual(0x14, @offsetOf(Regs, "qe_status"));
     try std.testing.expectEqual(0x1c, @offsetOf(Regs, "claim"));
     try std.testing.expectEqual(0x100, @offsetOf(Regs, "page"));
 }
@@ -295,6 +313,20 @@ test "the Mmio bus compiles with the driver" {
     _ = &D.program;
     _ = &D.lock;
     _ = &D.lockMask;
+    _ = &D.quadEnable;
+}
+
+test "quad enable result follows the err and ID bits and takes no claim" {
+    var model: Model = .{};
+    var d = testDriver(&model);
+    try std.testing.expectEqual(QuadEnable.ok, d.quadEnable());
+    model.qe_status = 1 | qe_err;
+    try std.testing.expectEqual(QuadEnable.failed, d.quadEnable());
+    model.qe_status = 1 | qe_err | qe_unknown_id;
+    try std.testing.expectEqual(QuadEnable.unknown_id, d.quadEnable());
+    model.qe_status = 1 | qe_unknown_id;
+    try std.testing.expectEqual(QuadEnable.unknown_id, d.quadEnable());
+    try std.testing.expectEqual(0, model.takes);
 }
 
 test "erase clears one sector and nothing else" {
