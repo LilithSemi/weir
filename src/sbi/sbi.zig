@@ -12,15 +12,7 @@ const hsm = @import("hsm.zig");
 const ipi_mailbox = @import("ipi.zig");
 const vars = @import("vars.zig");
 const rt_abi = @import("../var/rt_abi.zig");
-const platform = @import("../platform.zig");
-
-/// SiFive-style test finisher. A write of this magic value powers the machine
-/// off. The device tree gives the finisher address. Weir does not assume it.
-const FINISHER_PASS: u32 = 0x5555;
-
-fn finisher() *volatile u32 {
-    return @ptrFromInt(platform.resetBase());
-}
+const reset = @import("reset.zig");
 
 // Extension IDs.
 const EID_LEGACY_PUTCHAR = 0x01;
@@ -33,6 +25,11 @@ const EID_RFENCE = 0x52464E43; // "RFNC" remote fence
 const EID_HSM = 0x48534D; // "HSM" hart state management
 const EID_DBCN = 0x4442434E; // "DBCN" debug console
 const EID_SRST = 0x53525354; // "SRST" system reset
+
+// SRST reset types.
+const srst_shutdown = 0;
+const srst_cold_reboot = 1;
+const srst_warm_reboot = 2;
 
 // mie / mip bits used to relay machine interrupts down to supervisor level.
 const MIE_MTIE: usize = 1 << 7; // machine timer
@@ -63,7 +60,8 @@ pub fn dispatch(eid: usize, fid: usize, args: [6]usize) Ret {
             return .{};
         },
         EID_LEGACY_GETCHAR => legacyGetchar(),
-        EID_LEGACY_SHUTDOWN, EID_SRST => shutdown(),
+        EID_LEGACY_SHUTDOWN => reset.shutdown(),
+        EID_SRST => srst(fid, args),
         EID_BASE => base(fid, args),
         EID_TIME => time(fid, args),
         EID_IPI => ipi(fid, args),
@@ -248,7 +246,11 @@ fn dbcn(fid: usize, args: [6]usize) Ret {
     };
 }
 
-pub fn shutdown() noreturn {
-    finisher().* = FINISHER_PASS;
-    cpu.halt();
+fn srst(fid: usize, args: [6]usize) Ret {
+    if (fid != 0) return .{ .err = SBI_ERR_NOT_SUPPORTED };
+    return switch (args[0]) {
+        srst_shutdown => reset.shutdown(),
+        srst_cold_reboot, srst_warm_reboot => reset.reboot(),
+        else => .{ .err = SBI_ERR_INVALID_PARAM },
+    };
 }

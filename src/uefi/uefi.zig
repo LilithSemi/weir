@@ -24,7 +24,6 @@ const smbios = @import("../smbios/smbios.zig");
 const display = @import("display.zig");
 const unit_id = @import("../drivers/unit_id.zig");
 const acpi_qemu = @import("../acpi/qemu.zig");
-const platform = @import("../platform.zig");
 const mem = @import("../mem.zig");
 const tpm = @import("../tpm/tpm.zig");
 const tcg2 = @import("../tpm/tcg2.zig");
@@ -35,9 +34,18 @@ const config = @import("../config.zig");
 const Status = uefi.Status;
 const tables = uefi.tables;
 
-// SiFive-style test finisher, address from device-tree discovery.
-fn finisher() *volatile u32 {
-    return @ptrFromInt(platform.resetBase());
+const SbiReset = enum(usize) { shutdown = 0, cold_reboot = 1, warm_reboot = 2 };
+
+/// Asks the SBI layer for a system reset. The devices that do it are in M-mode.
+fn sbiReset(kind: SbiReset) noreturn {
+    asm volatile ("ecall"
+        :
+        : [kind] "{x10}" (@intFromEnum(kind)),
+          [reason] "{x11}" (0),
+          [fid] "{x16}" (0),
+          [eid] "{x17}" (0x53525354),
+        : .{ .x10 = true, .x11 = true, .memory = true });
+    cpu.halt();
 }
 
 // Memory layout advertised to the app, derived from build-time ram_base (see
@@ -818,8 +826,7 @@ fn exitApp(
     _ = status;
     _ = data_size;
     _ = data;
-    finisher().* = 0x5555; // power off
-    cpu.halt();
+    sbiReset(.shutdown);
 }
 
 // --- Image loading ----------------------------------------------------------
@@ -1199,18 +1206,23 @@ fn setTime(t: *const uefi.Time) callconv(.c) usize {
     return if (written) ok else @backingInt(Status.device_error);
 }
 
+const efi_reset_warm = 1;
+const efi_reset_shutdown = 2;
+
 fn resetSystem(
     reset_type: u32,
     status: usize,
     data_size: usize,
     data: ?[*]const u16,
 ) callconv(.c) noreturn {
-    _ = reset_type;
     _ = status;
     _ = data_size;
     _ = data;
-    finisher().* = 0x5555; // power off
-    cpu.halt();
+    sbiReset(switch (reset_type) {
+        efi_reset_warm => .warm_reboot,
+        efi_reset_shutdown => .shutdown,
+        else => .cold_reboot,
+    });
 }
 
 // --- Table construction -----------------------------------------------------

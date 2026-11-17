@@ -7,6 +7,7 @@
 //! bits. This gives synchronous RFENCE semantics.
 
 const clint = @import("../arch/riscv/clint.zig");
+const reset = @import("reset.zig");
 
 pub const MAX_HARTS = 8;
 
@@ -14,6 +15,8 @@ pub const MAX_HARTS = 8;
 pub const SOFT: u32 = 1 << 0; // relay to S-mode as SSIP
 pub const FENCE_I: u32 = 1 << 1; // execute FENCE.I locally
 pub const SFENCE_VMA: u32 = 1 << 2; // execute SFENCE.VMA locally (full flush)
+pub const STOP: u32 = 1 << 3; // stop the hart for a power off
+pub const RESTART: u32 = 1 << 4; // start again at the boot ROM
 
 var pending: [MAX_HARTS]u32 = @splat(0);
 
@@ -38,6 +41,9 @@ pub fn sendSync(target: usize, ops: u32) void {
 pub fn service(hartid: usize) bool {
     const ops = @atomicLoad(u32, &pending[hartid], .acquire);
     clint.clearIpi(hartid);
+
+    if (ops & RESTART != 0) reset.restartHart();
+    if (ops & STOP != 0) reset.stopHart();
 
     if (ops & FENCE_I != 0) asm volatile ("fence.i" ::: .{ .memory = true });
     if (ops & SFENCE_VMA != 0) asm volatile ("sfence.vma" ::: .{ .memory = true });

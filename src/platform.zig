@@ -8,12 +8,6 @@
 const console = @import("console/console.zig");
 const soc = @import("soc");
 
-// Peripherals that conduit does not surface for this SoC keep fixed defaults. A
-// Harbor SoC like creek has no CFI or reset device. Those belong to the
-// runtime-DT world that Weir no longer walks. fw-cfg is discovered from the tree
-// (soc.fwcfg_base): QEMU's virt machine has it, a real River SoC does not.
-const reset_base_v: usize = 0x100000;
-
 /// Discovery is comptime through soc.zig and conduit, so there is nothing to do
 /// at runtime. This stub stays so call sites need not change.
 pub fn discover(dtb: usize) void {
@@ -39,9 +33,6 @@ pub fn uartBase() usize {
 }
 pub fn clintBase() usize {
     return soc.clint_base;
-}
-pub fn resetBase() usize {
-    return reset_base_v;
 }
 pub fn tpmPresent() bool {
     return soc.tpm_present;

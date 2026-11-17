@@ -85,6 +85,25 @@ M-mode share this layout.
 The `seal` operation applies the store rules for the time after
 `ExitBootServices`. `ExitBootServices` makes this request.
 
+## System reset
+
+`system_reset` accepts the types shutdown (0), cold reboot (1) and warm reboot
+(2). The two reboot types do the same thing. Another type gives
+`SBI_ERR_INVALID_PARAM`. The legacy `shutdown` call does a shutdown. The EFI
+`ResetSystem` service makes this call.
+
+Weir uses the reset device of the device tree when the tree has one. See
+[device-tree.md](device-tree.md#reset-and-power).
+
+For a reboot on a board with no reset device, Weir starts each hart again at the
+start of the boot ROM, with interrupts off and `satp` clear. The boot ROM then
+loads the firmware again. This does not reset the devices, so the boot code
+must set up each device that it uses. A tree with no boot ROM node gives no
+reboot: Weir prints a line and stops the harts.
+
+For a shutdown on a board with no power device, Weir prints a line and stops
+the harts. The board stays on.
+
 ## Not yet implemented
 
 Weir does not yet provide PMU, SUSP, STA, CPPC, or the SBI v3 extensions (SSE,

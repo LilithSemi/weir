@@ -269,6 +269,45 @@ pub const unit_id_base: ?usize = if (has_dt) blk: {
     break :blk @intCast(r.base);
 } else null;
 
+pub const Syscon = struct { address: usize, value: u32 };
+
+fn syscon(comptime id: []const u8) ?Syscon {
+    @setEvalBranchQuota(8_000_000);
+    const dtb = @embedFile("soc_dtb");
+    const handle = dt_reg.propU32(dtb, id, "regmap") orelse return null;
+    const regmap = dt_reg.byPhandle(dtb, handle) orelse
+        @compileError("the regmap of the " ++ id ++ " node names no node with a reg");
+    return .{
+        .address = @intCast(regmap.base + (dt_reg.propU32(dtb, id, "offset") orelse 0)),
+        .value = dt_reg.propU32(dtb, id, "value") orelse return null,
+    };
+}
+
+// A build without a tree is for QEMU virt, which has the SiFive test device.
+const qemu_test_base = 0x100000;
+
+/// The register write that turns the power off. Null when the tree has no
+/// `syscon-poweroff` node.
+pub const poweroff: ?Syscon = if (has_dt)
+    syscon("syscon-poweroff")
+else
+    .{ .address = qemu_test_base, .value = 0x5555 };
+
+/// The register write that resets the system. Null when the tree has no
+/// `syscon-reboot` node.
+pub const reboot: ?Syscon = if (has_dt)
+    syscon("syscon-reboot")
+else
+    .{ .address = qemu_test_base, .value = 0x7777 };
+
+/// The start of the boot ROM, where a hart starts after a reset. Null when the
+/// tree has no `harbor,maskrom` node.
+pub const restart_vector: ?usize = if (has_dt) blk: {
+    @setEvalBranchQuota(8_000_000);
+    const r = dt_reg.first(@embedFile("soc_dtb"), "harbor,maskrom") orelse break :blk null;
+    break :blk @intCast(r.base);
+} else null;
+
 pub const Framebuffer = struct { base: usize, size: usize };
 
 /// The memory of a `simple-framebuffer` node. Null when the tree has none.

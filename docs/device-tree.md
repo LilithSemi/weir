@@ -119,6 +119,17 @@ bank for the store and needs no partition. Store bank 0 is the first 256 KiB
 erase block of that flash bank and store bank 1 is the second. Weir uses 128 KiB
 of each block.
 
+## Reset and power
+
+Weir reads the `syscon-reboot` and `syscon-poweroff` nodes. Each has a `regmap`
+phandle to a node with a `reg`, an `offset` and a `value`. Weir writes the value
+as a 32-bit word to the register at that offset. Weir does not use the `mask`
+property.
+
+A tree without these nodes is correct for a board with no such device. Then
+Weir uses the first `reg` address of the `harbor,maskrom` node as the address
+where a hart starts after a reset. See [sbi.md](sbi.md#system-reset).
+
 ## Displays
 
 Weir uses each node with the compatible `harbor,display`, in the order of the
