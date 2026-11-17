@@ -108,7 +108,8 @@ Weir gets its drivers from `conduit`. To support a new device:
 
 ## Console notes
 
-Weir binds conduit's `ns16550a` driver for the console. River's minimal UART
-does not acknowledge writes to the FIFO or modem-control registers, so Weir
-binds it with `minimal_init`, which programs only the line-control and baud
-registers. QEMU accepts the full init, so the one path serves both.
+Weir binds conduit's `ns16550a` driver for the console. The main firmware uses
+the full init, which also turns on the FIFOs. The FSBL only sends, so it binds
+with `minimal_init`, which programs only the line-control and baud registers.
+A UART that does not acknowledge a write to the FIFO or modem-control register
+stops the main firmware at its first line.

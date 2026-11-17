@@ -10,7 +10,7 @@ const cfg = @import("config.zig");
 pub const panic = std.debug.FullPanic(panicHandler);
 
 // The FSBL console: conduit's ns16550a with a std.Io.Writer over it. River gates
-// TX on a nonzero divisor and stalls on FCR/MCR writes, so use minimal_init.
+// TX on a nonzero divisor. The FSBL only sends, so minimal_init is sufficient.
 // run() calls uart_dev.init() to program the baud before real output.
 var uart_dev = conduit.driver.ns16550a.Ns16550a{
     .mmio = conduit.Mmio.direct(cfg.uart_base),

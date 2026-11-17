@@ -186,6 +186,6 @@ same blocks with `crc` and compare it with the CRC of the data on the host.
 The virtio-blk driver has no write path, so on QEMU a write gets status 5. The
 crc command works on QEMU.
 
-The Harbor UART has no receive FIFO. Weir polls for each byte, and writes to the
-card only after a frame is complete. The host waits for each reply before it
+The Harbor UART has a receive FIFO of 16 bytes. Weir polls for each byte, and
+writes to the card only after a frame is complete. The host waits for each reply before it
 sends the next request.

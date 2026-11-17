@@ -78,7 +78,8 @@ quirks, and River's docs cover them.
 ## Common failures
 
 - **No console output.** The UART is not up, or the SoC has a UART register
-  quirk. Weir binds the console with `minimal_init` for River. See
+  quirk. If the FSBL lines show and the main firmware is silent, the UART can
+  have a fault on the FIFO or modem-control register. See
   [porting.md](porting.md).
 - **A hang after ACPI or storage.** Often a DDR issue or a misaligned access.
   Read the trap dump.

@@ -43,12 +43,10 @@ const default_divisor: u16 = soc.uartDivisor(115200) orelse
     @compileError("the UART clock is too low for 115200 baud");
 
 pub fn init() void {
-    // River sends nothing while the divisor is 0. It also stalls on FCR/MCR
-    // writes, so bind with minimal_init. QEMU virt ignores the divisor and
-    // accepts the full init, so this path serves both.
+    // River sends nothing while the divisor is 0. The init also turns on the
+    // FIFOs. QEMU virt ignores the divisor.
     dev = conduit.driver.ns16550a.bind(conduit.Mmio.direct(platform.uartBase()), .{
         .divisor = default_divisor,
-        .minimal_init = true,
     });
     ws_out = dev.serial().writer(&out_buf);
     ws_err = dev.serial().writer(&err_buf);
@@ -80,8 +78,8 @@ pub fn divisorFor(baud: u32) ?u16 {
     return soc.uartDivisor(baud);
 }
 
-/// Programs a new rate with the same minimal init as `init`. Returns false and
-/// keeps the rate for a bad baud.
+/// Programs a new rate. It does not reset the FIFOs, so a byte that the host
+/// sent early stays. Returns false and keeps the rate for a bad baud.
 pub fn setBaud(baud: u32) bool {
     const div = divisorFor(baud) orelse return false;
     dev = conduit.driver.ns16550a.bind(conduit.Mmio.direct(platform.uartBase()), .{
