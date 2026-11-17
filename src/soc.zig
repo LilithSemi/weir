@@ -283,6 +283,8 @@ pub const Display = struct {
     base: usize,
     /// The framebuffer of a build with a fixed one, from `memory-region`.
     fixed: ?Framebuffer,
+    /// The memory that the display can show, from `harbor,scanout-memory`.
+    scanout: ?Framebuffer,
 };
 
 const display_id = "harbor,display";
@@ -307,6 +309,10 @@ const displays_arr: [display_count]Display = blk: {
         display.* = .{
             .base = @intCast(reg.base),
             .fixed = if (region) |r| .{ .base = @intCast(r.base), .size = @intCast(r.size) } else null,
+            .scanout = if (dt_reg.nthPropRegion(dtb, display_id, i, "harbor,scanout-memory")) |r|
+                .{ .base = @intCast(r.base), .size = @intCast(r.size) }
+            else
+                null,
         };
     }
     break :blk arr;

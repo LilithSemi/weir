@@ -10,6 +10,7 @@ const gop = @import("../display/gop.zig");
 const harbor = @import("../display/harbor.zig");
 const handledb = @import("handledb.zig");
 const page_alloc = @import("page_alloc.zig");
+const placer = @import("framebuffer_place.zig");
 
 const Status = uefi.Status;
 const Gop = uefi.protocol.GraphicsOutput;
@@ -34,8 +35,6 @@ var states: [soc.displays.len]State = @splat(.{
 
 var pool: ?*page_alloc.Pool = null;
 
-const framebuffer_tag: page_alloc.Tag = .{ .kind = .reserved, .owner = .firmware };
-
 /// Gives each display a framebuffer and starts it. Call when the page pool
 /// is new, before the first allocation of a loader.
 pub fn setup(pages: *page_alloc.PageAllocator, memory_pool: *page_alloc.Pool) void {
@@ -50,7 +49,12 @@ pub fn setup(pages: *page_alloc.PageAllocator, memory_pool: *page_alloc.Pool) vo
             console.err.print("[display] no mode that Weir can draw at {x}\n", .{display.base}) catch {};
             continue;
         };
-        const address = place(pages, display, mode, &top) orelse {
+        const address = placer.place(pages, .{
+            .size = std.mem.alignForward(usize, mode.size(), page_alloc.page_size),
+            .alignment = harbor.alignment(mode.stride),
+            .fixed = range(display.fixed),
+            .scanout = range(display.scanout),
+        }, &top) orelse {
             console.err.print("[display] no memory for the framebuffer at {x}\n", .{display.base}) catch {};
             continue;
         };
@@ -79,33 +83,9 @@ pub fn setup(pages: *page_alloc.PageAllocator, memory_pool: *page_alloc.Pool) vo
     }
 }
 
-/// The address of the framebuffer of one display. The display register holds
-/// 32 bits, so the framebuffer is below 4 GiB.
-fn place(pages: *page_alloc.PageAllocator, display: soc.Display, mode: gop.Mode, top: *usize) ?usize {
-    if (display.fixed) |fixed| {
-        if (fixed.size < mode.size()) return null;
-        const end = fixed.base + fixed.size;
-        if (end > std.math.maxInt(u32)) return null;
-        // A fixed framebuffer that is in the pool must come out of it.
-        if (end > pages.base and fixed.base < pages.end) {
-            if (!pages.allocAt(fixed.base, fixed.size, framebuffer_tag)) return null;
-        }
-        return fixed.base;
-    }
-    const size = std.mem.alignForward(usize, mode.size(), page_alloc.page_size);
-    const alignment = harbor.alignment(mode.stride);
-    const address = blk: {
-        if (top.* >= pages.base + size) {
-            const high = std.mem.alignBackward(usize, top.* - size, alignment);
-            if (high >= pages.base and pages.allocAt(high, size, framebuffer_tag)) {
-                top.* = high;
-                break :blk high;
-            }
-        }
-        break :blk pages.alloc(size, alignment, std.math.maxInt(u32), framebuffer_tag) orelse return null;
-    };
-    if (address + size > std.math.maxInt(u32)) return null;
-    return address;
+fn range(memory: ?soc.Framebuffer) ?placer.Range {
+    const m = memory orelse return null;
+    return .{ .base = m.base, .size = m.size };
 }
 
 fn stateOf(protocol: *const Gop) ?*State {

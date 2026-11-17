@@ -249,6 +249,7 @@ pub fn build(b: *std.Build) void {
         "src/layout.zig",
         "src/smbios/structs.zig",
         "src/smbios/table.zig",
+        "src/uefi/framebuffer_place.zig",
         "src/uefi/page_alloc.zig",
         "src/var/efi.zig",
         "src/var/log.zig",

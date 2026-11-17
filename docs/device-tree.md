@@ -131,6 +131,12 @@ zeros to it, gives the address to the display and turns the display on. The
 EFI memory map reports the framebuffer as reserved memory, so it stays in use
 after the OS starts. Each display has its own framebuffer.
 
+The property `harbor,scanout-memory` on a display node gives the memory that
+the display can show, as one address and size pair. Weir puts the framebuffer
+in that memory. When that memory is not in the `/memory` node, the framebuffer
+is at its start. Without the property, the framebuffer comes from the RAM of
+the `/memory` node.
+
 A display node with a `memory-region` has a fixed framebuffer: the first `reg`
 entry of the node that the phandle names. Weir uses that memory and allocates
 none. Keep a fixed framebuffer out of the `/memory` node. Weir does not read

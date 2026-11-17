@@ -153,6 +153,19 @@ pub fn nthPropU32(dtb: []const u8, compatible: []const u8, index: usize, name: [
     return std.mem.readInt(u32, value[0..cell_bytes], .big);
 }
 
+/// A property with one address and size pair, in the cells of the parent, of
+/// node number `index` of the nodes with this compatible.
+pub fn nthPropRegion(dtb: []const u8, compatible: []const u8, index: usize, name: []const u8) ?Region {
+    const node = find(dtb, .{ .compatible = .{ .id = compatible, .index = index } }, name) orelse return null;
+    const pair: Node = .{
+        .reg = node.prop orelse return null,
+        .addr_cells = node.addr_cells,
+        .size_cells = node.size_cells,
+        .prop = null,
+    };
+    return pair.region();
+}
+
 const testing = std.testing;
 
 fn tree(gpa: std.mem.Allocator, cells: u32) ![]u8 {
@@ -228,6 +241,7 @@ fn displayTree(gpa: std.mem.Allocator) ![]u8 {
     try b.propString("compatible", "harbor,display");
     try b.propCells("reg", &.{ 0x10003000, 0x1000 });
     try b.propU32("memory-region", 7);
+    try b.propCells("harbor,scanout-memory", &.{ 0x80000000, 0x2000000 });
     try b.endNode();
     try b.beginNode("display@10004000");
     try b.propString("compatible", "harbor,display");
@@ -247,6 +261,11 @@ test "each node with the same compatible has its own number" {
     try testing.expect(nth(dtb, "harbor,display", 2) == null);
     try testing.expectEqual(@as(?u32, 7), nthPropU32(dtb, "harbor,display", 0, "memory-region"));
     try testing.expectEqual(@as(?u32, null), nthPropU32(dtb, "harbor,display", 1, "memory-region"));
+    const scanout = nthPropRegion(dtb, "harbor,display", 0, "harbor,scanout-memory").?;
+    try testing.expectEqual(@as(u64, 0x80000000), scanout.base);
+    try testing.expectEqual(@as(u64, 0x2000000), scanout.size);
+    try testing.expect(nthPropRegion(dtb, "harbor,display", 1, "harbor,scanout-memory") == null);
+    try testing.expect(nthPropRegion(dtb, "harbor,display", 0, "memory-region") == null);
 }
 
 test "a node is found by its phandle" {
