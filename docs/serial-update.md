@@ -68,7 +68,7 @@ Two rules keep the host and Weir in step after an error:
 | 7 | probe | SD host u8 | trace records, see below |
 | 8 | write trace | SD host u8, lba u64, count u8 (1), then 512 data bytes | trace records, see below |
 | 9 | read trace | SD host u8, lba u64, count u8 (0 to 8) | trace records, see below |
-| 10 | SD command | SD host u8, opcode u8, response type u8 (0 none, 1 short, 2 long, 3 short with busy), argument u32 | one trace record |
+| 10 | SD command | SD host u8, opcode u8, response type u8 (0 none, 1 short, 2 long, 3 short with busy, 4 short with no CRC and no index), argument u32 | one trace record |
 | 11 | SD register | SD host u8, offset u8, write u8 (0 or 1), value u32 | the register value u32 |
 
 The info reply has the version u8 (1), the maximum blocks for one write u8 (8)
@@ -99,7 +99,7 @@ state after a probe, so send `rescan` before the next `write` or `crc`.
 | Field | Size | Notes |
 | --- | --- | --- |
 | opcode | 1 | the SD command index. 0xff is the first record, the controller state before the first command |
-| outcome | 1 | 0 ok, 1 controller busy before the command, 2 controller busy after it, 3 no response from the card |
+| outcome | 1 | 0 ok, 1 controller busy before the command, 2 controller busy after it, 3 no response from the card, 4 a response with a bad CRC, end bit or index |
 | count | 2 | for commands 55 and 41, the number of tries. Only the last try has records |
 | INT_STATUS | 4 | the controller register after the command |
 | response | 4 | the first response word (RESP0) |
@@ -146,11 +146,19 @@ before a `rescan` or a `probe`. Those send command 0, and the traces do not.
 The two traces use the card address from the last time the storage was found,
 so they also work when the card stopped after that.
 
-`SD command` sends one command with no data phase and gives its record. `SD
-register` reads one register of the SD host, after a write of the value when
-the write byte is 1. The offset is a multiple of 8 below 0x80. These two are
-for tests of the host and the card by hand. They do not go through the block
-driver, so send `rescan` before the next `write` or `crc`.
+`SD command` sends one command with no data phase and gives its record. Use
+response type 4 for a command whose response has no CRC and no command index,
+such as command 41 after command 55. The host checks both for the other
+types.
+
+`SD register` reads one register of the SD host, after a write of the value
+when the write byte is 1. The offset is a multiple of 8 below 0x98. The
+register at 0x90 has the levels of the bus: bit 0 is the CMD line, bit 1 is
+set when the host drives CMD, bits 11 to 4 are the DAT lines, and bits 23 to
+16 are set for the DAT lines that the host drives.
+
+These two are for tests of the host and the card by hand. They do not go
+through the block driver, so send `rescan` before the next `write` or `crc`.
 
 ## Status codes
 

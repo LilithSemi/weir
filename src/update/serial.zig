@@ -147,7 +147,7 @@ pub fn Engine(comptime Transport: type, comptime Entry: type) type {
         fn sdCommand(self: *Self, req: Request) void {
             const service = self.hooks.sd_command orelse return self.reply(.unknown_command, req.seq, 0);
             const args = req.payload;
-            if (args.len != 7 or args[2] > 3) return self.reply(.bad_argument, req.seq, 0);
+            if (args.len != 7 or args[2] > 4) return self.reply(.bad_argument, req.seq, 0);
             const index = args[0];
             const opcode = args[1];
             const resp = args[2];
@@ -1027,7 +1027,7 @@ test "sd command and sd register pass their arguments and give the record or the
     const cmd = @backingInt(Command.sd_command);
     const reg = @backingInt(Command.sd_register);
     script.request(cmd, 1, &.{ 0, 13, 1, 0x00, 0x00, 0xaa, 0xaa });
-    script.request(cmd, 2, &.{ 0, 13, 4, 0, 0, 0, 0 });
+    script.request(cmd, 2, &.{ 0, 13, 5, 0, 0, 0, 0 });
     script.request(cmd, 3, &.{ 1, 13, 1, 0, 0, 0, 0 });
     script.request(reg, 4, &.{ 0, 0x10, 1, 0x1f, 0, 0, 0 });
     script.request(reg, 5, &.{ 0, 0x11, 0, 0, 0, 0, 0 });

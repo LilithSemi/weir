@@ -19,6 +19,8 @@ pub const Outcome = enum(u8) {
     busy_after = 2,
     /// The card sent no response.
     timeout = 3,
+    /// The response had a bad CRC7, end bit or command index.
+    bad_response = 4,
 };
 
 /// The opcode of the first record. It holds the controller state before the
@@ -37,12 +39,15 @@ const int_enable = 0x68;
 const ctrl_sample_fall: u32 = 1 << 8;
 const status_busy: u32 = 1 << 8;
 const int_cmd_timeout: u32 = 0x10;
-const int_all: u32 = 0xff;
+const int_resp_errors: u32 = 0xe00;
+const int_all: u32 = 0xfff;
 
 const resp_none = 0;
 const resp_short = 1;
 const resp_long = 2;
 const resp_busy = 3;
+/// The response type that `runCommand` takes for an R3 response.
+pub const resp_r3 = 4;
 
 const init_hz = 400_000;
 const busy_polls = 4_000_000;
@@ -55,6 +60,8 @@ const adma_addr = 0x70;
 const flag_data: u32 = 1 << 8;
 const flag_read: u32 = 1 << 9;
 const flag_dma: u32 = 1 << 10;
+// An R3 response has no CRC7 and no command index. These bits stop the checks.
+const flag_r3: u32 = (1 << 12) | (1 << 13);
 
 const send_status = 13;
 const card_ready: u32 = 1 << 8;
@@ -136,7 +143,7 @@ pub fn Tracer(comptime Bus: type) type {
                 tries += 1;
                 const mark = self.len;
                 const app = self.command(55, 0, resp_short, tries);
-                const ocr = if (app != null) self.command(41, hcs | 0x00ff_8000, resp_short, tries) else null;
+                const ocr = if (app != null) self.commandFlags(41, hcs | 0x00ff_8000, resp_short, flag_r3, tries) else null;
                 ready = if (ocr) |r| r & 0x8000_0000 != 0 else false;
                 if (ocr == null) break;
                 if (!ready and tries < op_cond_tries) self.len = mark;
@@ -231,8 +238,13 @@ pub fn Tracer(comptime Bus: type) type {
                 return null;
             }
             const response = self.bus.read(resp0);
-            if (self.bus.read(int_status) & int_cmd_timeout != 0) {
+            const int = self.bus.read(int_status);
+            if (int & int_cmd_timeout != 0) {
                 self.record(opcode, .timeout, count, response);
+                return null;
+            }
+            if (int & int_resp_errors != 0) {
+                self.record(opcode, .bad_response, count, response);
                 return null;
             }
             self.record(opcode, .ok, count, response);
@@ -268,16 +280,21 @@ pub fn run(base: usize, freq: u32, out: []u8) usize {
 }
 
 /// Sends one command with no data to the host at `base` and writes its record
-/// to `out`. `resp` is the response type of the controller, 0 to 3. It
-/// returns the number of bytes written.
+/// to `out`. `resp` is the response type of the controller, 0 to 3, or
+/// `resp_r3` for a short response with no CRC7 and no index. It returns the
+/// number of bytes written.
 pub fn runCommand(base: usize, opcode: u8, resp: u8, arg: u32, out: []u8) usize {
     var tracer: Tracer(Mmio) = .{ .bus = .{ .base = base }, .out = out };
-    _ = tracer.command(opcode & 0x3f, arg, resp & 3, 0);
+    if (resp == resp_r3) {
+        _ = tracer.commandFlags(opcode & 0x3f, arg, resp_short, flag_r3, 0);
+    } else {
+        _ = tracer.command(opcode & 0x3f, arg, resp & 3, 0);
+    }
     return tracer.len;
 }
 
 /// The size of the register block of the controller.
-pub const register_span = 0x80;
+pub const register_span = 0x98;
 
 /// Writes `value` to the register at `offset` when `write` is set, then
 /// reads the register. `offset` is a multiple of 8 below register_span.
@@ -377,12 +394,18 @@ const Model = struct {
             int_status => self.int &= ~value,
             ctrl => self.control = value,
             clk_div => self.divider = value,
-            cmd_reg => self.send(@intCast(value & 0x3f)),
+            cmd_reg => self.send(@intCast(value & 0x3f), value & flag_r3 == flag_r3),
             else => {},
         }
     }
 
-    fn send(self: *Model, opcode: u8) void {
+    fn send(self: *Model, opcode: u8, unchecked: bool) void {
+        // The host checks the CRC7 and the index, which an R3 response does
+        // not have. A bad response does not set command done.
+        if (self.card and opcode == 41 and !unchecked) {
+            self.int |= 0xa00;
+            return;
+        }
         self.int |= 1;
         if (opcode == 0) return;
         if (!self.card) {
@@ -433,6 +456,17 @@ test "a card that answers gives one record for each step and the try count" {
     try testing.expectEqual(@as(u16, 3), recordAt(&out, 4).count);
     try testing.expectEqual(@as(u32, 0xc0ff_8000), recordAt(&out, 4).resp);
     try testing.expectEqual(@as(u32, 0x1234_0500), recordAt(&out, 6).resp);
+}
+
+test "a response with an error bit gives a bad response record" {
+    var model: Model = .{};
+    var out: [2 * record_len]u8 = undefined;
+    var tracer: Tracer(*Model) = .{ .bus = &model, .out = &out, .busy_limit = 4 };
+    try testing.expect(tracer.command(41, 0, resp_short, 0) == null);
+    try testing.expectEqual(Outcome.bad_response, recordAt(&out, 0).outcome);
+    try testing.expectEqual(@as(u32, 0xa00), recordAt(&out, 0).int);
+    try testing.expect(tracer.commandFlags(41, 0, resp_short, flag_r3, 0) != null);
+    try testing.expectEqual(Outcome.ok, recordAt(&out, 1).outcome);
 }
 
 test "a slot with no card stops at the first command that needs a response" {
