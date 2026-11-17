@@ -34,6 +34,7 @@ const resp0 = 0x28;
 const int_status = 0x60;
 const int_enable = 0x68;
 
+const ctrl_sample_fall: u32 = 1 << 8;
 const status_busy: u32 = 1 << 8;
 const int_cmd_timeout: u32 = 0x10;
 const int_all: u32 = 0xff;
@@ -115,7 +116,8 @@ pub fn Tracer(comptime Bus: type) type {
         /// Runs the sequence for a host with an input clock of `freq` Hz. It
         /// returns the number of bytes written to `out`.
         pub fn run(self: *Self, freq: u32) usize {
-            self.bus.write(ctrl, 1);
+            // The reset value of the sample edge bit is the choice of the board.
+            self.bus.write(ctrl, (self.bus.read(ctrl) & ctrl_sample_fall) | 1);
             self.bus.write(int_enable, 0);
             self.bus.write(int_status, int_all);
             const half = freq / (2 * init_hz);
@@ -358,9 +360,11 @@ const Model = struct {
     int: u32 = 0,
     resp: u32 = 0,
     divider: u32 = 0xffff_ffff,
+    control: u32 = ctrl_sample_fall,
 
     pub fn read(self: *Model, off: usize) u32 {
         return switch (off) {
+            ctrl => self.control,
             status => (if (self.stuck) status_busy else 0) | 1,
             int_status => self.int,
             resp0 => self.resp,
@@ -371,6 +375,7 @@ const Model = struct {
     pub fn write(self: *Model, off: usize, value: u32) void {
         switch (off) {
             int_status => self.int &= ~value,
+            ctrl => self.control = value,
             clk_div => self.divider = value,
             cmd_reg => self.send(@intCast(value & 0x3f)),
             else => {},
@@ -416,6 +421,7 @@ test "a card that answers gives one record for each step and the try count" {
     const len = tracer.run(25_000_000);
     try testing.expectEqual(7 * record_len, len);
     try testing.expectEqual(@as(u32, 30), model.divider);
+    try testing.expectEqual(ctrl_sample_fall | 1, model.control);
 
     const opcodes = [_]u8{ state_opcode, 0, 8, 55, 41, 2, 3 };
     for (opcodes, 0..) |opcode, i| {
