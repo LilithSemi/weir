@@ -23,6 +23,8 @@ const build_options = @import("build_options");
 const cpu = @import("arch/riscv/cpu.zig");
 const clint = @import("arch/riscv/clint.zig");
 const soc = @import("soc");
+const update_serial = @import("update/serial.zig");
+const update_uart = @import("update/uart.zig");
 
 /// Firmware panic handler. The UART is reachable from both M- and S-mode, so it
 /// reports wherever a panic happens, then parks the hart.
@@ -494,6 +496,30 @@ fn noBoot() noreturn {
     cpu.halt();
 }
 
+/// Offers the serial update mode for one second. The byte `U` starts it, and
+/// the boot continues when the host sends the boot command.
+fn serialUpdate() void {
+    _ = storage.init();
+    // Drop bytes that came before the prompt. The limit covers a UART that
+    // always reports data.
+    for (0..16) |_| if (console.readByte() == null) break;
+    console.out.writeAll("[update] send U to start a serial update\n") catch {};
+    var link: update_uart.Transport = .{};
+    const end = link.now() + 1000;
+    while (true) {
+        const left = end -| link.now();
+        if (left == 0) return;
+        const byte = link.readByte(@intCast(left)) orelse return;
+        if (byte == 'U') break;
+    }
+    console.out.writeAll("[update] ready\n") catch {};
+    var engine: update_serial.Engine(update_uart.Transport, storage.Device) = .{
+        .transport = &link,
+        .devices = storage.devices(),
+    };
+    engine.run();
+}
+
 /// Resolve the S-mode handoff, either a UEFI app under an EFI System Table or
 /// an ELF payload. Weir tries the boot sources in priority order. A boot manager
 /// that finds nothing falls back to an embedded payload. If every source fails,
@@ -523,6 +549,8 @@ pub fn handoff(hartid: usize, dtb: usize) Handoff {
         }
         console.out.writeAll("[rt] self-test: no variable store\n") catch {};
     }
+
+    if (config.serial_update) serialUpdate();
 
     if (config.boot_manager) {
         console.out.writeAll(

@@ -32,3 +32,6 @@ pub const version: std.SemanticVersion = options.version;
 
 /// The BIOS release date the SMBIOS tables report, as MM/DD/YYYY.
 pub const bios_date: []const u8 = options.bios_date;
+
+/// When true, Weir offers the serial update mode before the boot manager.
+pub const serial_update: bool = options.serial_update;

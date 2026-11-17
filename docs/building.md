@@ -37,6 +37,7 @@ zig build -Ddtb=board.dtb
 | `-Dboot-manager` | Boot through the ESP boot manager (GPT, FAT, BootOrder). |
 | `-Dvar-selftest` | Test the EFI variable store at each boot. See [testing.md](testing.md). |
 | `-Drt-selftest` | Test the variable services after `ExitBootServices`, then stop. See [testing.md](testing.md). |
+| `-Dserial-update` | Offer the serial update mode before the boot manager. See [serial-update.md](serial-update.md). |
 | `-Dinitrd=PATH` | An initramfs to serve the kernel through LoadFile2. |
 | `-Dboard-info=PATH` | Board identity (zon) for the SMBIOS tables. See [smbios.md](smbios.md). |
 | `-Dbios-date=DATE` | SMBIOS BIOS release date, as MM/DD/YYYY. |

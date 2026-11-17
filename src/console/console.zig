@@ -51,3 +51,42 @@ pub fn init() void {
     ws_err = dev.serial().writer(&err_buf);
     ws_in = dev.serial().reader(&in_buf);
 }
+
+const lsr = 5;
+const lsr_temt = 0x40;
+
+/// Returns one received byte, or null when no byte waits. Only the serial
+/// update mode reads the UART this way.
+pub fn readByte() ?u8 {
+    var b: [1]u8 = undefined;
+    return if (dev.read(&b) == 1) b[0] else null;
+}
+
+/// Sends `bytes` with no LF to CRLF change.
+pub fn writeRaw(bytes: []const u8) void {
+    for (bytes) |c| dev.putc(c);
+}
+
+/// True when the transmitter has sent all of its bytes.
+pub fn txEmpty() bool {
+    return dev.mmio.read(u8, lsr) & lsr_temt != 0;
+}
+
+/// The divisor for `baud`, or null when the divisor is 0 or over 0xffff.
+pub fn divisorFor(baud: u32) ?u16 {
+    if (baud == 0) return null;
+    const div = soc.uart_clock / baud;
+    if (div == 0 or div > 0xffff) return null;
+    return @intCast(div);
+}
+
+/// Programs a new rate with the same minimal init as `init`. Returns false and
+/// keeps the rate for a bad baud.
+pub fn setBaud(baud: u32) bool {
+    const div = divisorFor(baud) orelse return false;
+    dev = conduit.driver.ns16550a.bind(conduit.Mmio.direct(platform.uartBase()), .{
+        .divisor = div,
+        .minimal_init = true,
+    });
+    return true;
+}

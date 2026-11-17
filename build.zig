@@ -116,6 +116,7 @@ pub fn build(b: *std.Build) void {
 
     const var_selftest = b.option(bool, "var-selftest", "Test the EFI variable store at each boot") orelse false;
     const rt_selftest = b.option(bool, "rt-selftest", "Run the runtime variable self-test: it writes and keeps two variables in the store and ends the boot when a store exists") orelse false;
+    const serial_update = b.option(bool, "serial-update", "Offer a serial update mode before the boot manager, to write block devices over the UART") orelse false;
 
     // An initramfs to hand the Linux kernel via the LoadFile2 protocol, so it
     // reaches a real userspace instead of panicking for lack of a root fs.
@@ -139,6 +140,7 @@ pub fn build(b: *std.Build) void {
     options.addOption([]const u8, "bios_date", bios_date);
     options.addOption(bool, "var_selftest", var_selftest);
     options.addOption(bool, "rt_selftest", rt_selftest);
+    options.addOption(bool, "serial_update", serial_update);
 
     const mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -279,6 +281,13 @@ pub fn build(b: *std.Build) void {
     });
     fat_test_mod.addImport("conduit", conduit_host);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = fat_test_mod })).step);
+    const update_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/update/serial.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    update_test_mod.addImport("conduit", conduit_host);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = update_test_mod })).step);
     const copy_mem_test_mod = b.createModule(.{
         .root_source_file = b.path("src/uefi/copy_mem.zig"),
         .target = b.graph.host,
