@@ -102,7 +102,7 @@ pub fn boot(hartid: usize, dtb: usize) void {
         if (acpi_qemu.injectTpm2(platform.tpmBase())) |area| tpm.setLogArea(area.addr, area.len);
     }
     tpm.init();
-    if (boot_handoff.fsblPcr0(mem.ram_base, soc.ram_size)) |digest| {
+    if (boot_handoff.fsblPcr0(mem.ram_base, soc.ram_size, soc.hart_count)) |digest| {
         tpm.recordPrior(tpm.PCR_FIRMWARE, tpm.EV_POST_CODE, &digest, "weir firmware (FSBL)");
     } else {
         tpm.measureSelf(mem.ram_base);
@@ -417,12 +417,15 @@ pub const Handoff = struct {
 
 // Firmware-resident DTB copy. Weir hands it to an EFI app in reserved low RAM.
 // Only the UEFI/PE and boot-manager handoff paths use it, through stableDtb. A
-// size of 0 when none are enabled keeps it out of the zeroed bss.
+// size of 0 when none are enabled keeps it out of the zeroed bss. An embedded
+// tree is the only tree that Weir hands on, so the copy has its size.
 const dtb_copy_len: usize =
-    if (config.disk_boot or config.boot_manager or config.pe_app != null)
-        256 << 10
+    if (!(config.disk_boot or config.boot_manager or config.pe_app != null))
+        0
+    else if (config.dtb) |tree|
+        std.mem.alignForward(usize, tree.len, 8)
     else
-        0;
+        256 << 10;
 var dtb_copy: [dtb_copy_len]u8 align(8) = undefined;
 
 fn stableDtb(dtb: usize) usize {

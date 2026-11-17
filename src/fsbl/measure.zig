@@ -34,7 +34,7 @@ pub fn measureMain(con: *std.Io.Writer, len: usize) void {
     }
 
     // Write magic last so a reader never sees it before the rest of the record.
-    const rec = handoff.record(cfg.dram_base, cfg.dram_size);
+    const rec = handoff.record(cfg.dram_base, cfg.dram_size, cfg.hart_count);
     var i: usize = 0;
     while (i < 32) : (i += 1) rec.pcr0_digest[i] = digest[i];
     rec.pcr0_valid = 1;

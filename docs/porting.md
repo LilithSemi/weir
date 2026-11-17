@@ -65,13 +65,14 @@ the firmware and `tools/fdt2ld.zig` both use it. All offsets are from the RAM ba
 
 | Area | 128 MiB of RAM or more | Less than 128 MiB |
 | --- | --- | --- |
-| Firmware window | 0 to 32 MiB | 0 to 4 MiB |
+| Firmware window | 0 to 32 MiB | 0 to 2 MiB with one hart, 0 to 4 MiB with more |
 | ACPI tables | 63 MiB, 1 MiB long | top 64 KiB of the firmware window |
-| First EFI image | loads at 32 MiB | loads at 4 MiB |
+| First EFI image | loads at 32 MiB | loads at the end of the firmware window |
 | EFI page pool | 64 MiB to the end of RAM | after the first image (2 MiB aligned) to the end of RAM |
 | File staging buffer | 96 MiB, 64 MiB long | top half of RAM, at most 64 MiB |
 | `\EFI\BOOT\initrd` buffer | 512 MiB, 512 MiB long | none |
 | S-mode payload stacks | 8 of 1 MiB | 1 MiB for each hart in the tree |
+| M-mode boot stacks | 8 of 64 KiB | 64 KiB for each hart ID up to the largest in the tree |
 
 The first image must fit below the ACPI tables, or below the staging buffer when
 RAM is less than 128 MiB. The boot manager does not use the part of a staging
@@ -81,8 +82,8 @@ Weir needs at least 16 MiB of RAM. A smaller `memory` node stops the build.
 
 The firmware, with its stacks, must end inside the firmware window. The linker
 script checks this and stops the link when it does not fit. With less than
-128 MiB the window is 4 MiB, and a Debug build or a tree with many harts can be
-too large. Use `-Doptimize=ReleaseFast` or `-Doptimize=ReleaseSmall` then.
+128 MiB the window is 2 MiB or 4 MiB, and a Debug build or a tree with many harts
+can be too large. Use `-Doptimize=ReleaseFast` or `-Doptimize=ReleaseSmall` then.
 
 ## DRAM training
 

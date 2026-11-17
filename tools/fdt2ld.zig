@@ -66,10 +66,10 @@ pub fn main(init: std.process.Init) !void {
         });
     } else blk: {
         const selftest = std.mem.eql(u8, kind, "main-rt-selftest");
-        // The tool does not need the hart count: it does not change the limit.
-        const limit = layout.compute(bases.ram_size, 1).imageLimit();
+        const limit = layout.compute(bases.ram_size, bases.hart_count).imageLimit();
+        const stacks = layout.bootStacks(bases.ram_size, bases.hart_id_limit);
         break :blk try std.fmt.allocPrint(gpa, main_template, .{
-            bases.ram_base, if (selftest) selftest_sections else "", limit,
+            bases.ram_base, stacks, if (selftest) selftest_sections else "", limit,
         });
     };
 
@@ -88,7 +88,7 @@ const main_template =
     \\ENTRY(_start)
     \\RAM_BASE = 0x{x};
     \\STACK_SIZE = 0x10000; /* 64 KiB per hart. It must stay 1 << 16. See start.zig. */
-    \\MAX_HARTS = 8;
+    \\BOOT_STACKS = {d}; /* The reset code selects a stack by hart ID. */
     \\SECTIONS
     \\{{
     \\    . = RAM_BASE;
@@ -118,7 +118,7 @@ const main_template =
     \\    .noinit (NOLOAD) : {{ *(.noinit .noinit.*) }}
     \\    . = ALIGN(16);
     \\    _stacks_bottom = .;
-    \\    . = . + STACK_SIZE * MAX_HARTS;
+    \\    . = . + STACK_SIZE * BOOT_STACKS;
     \\    _stacks_top = .;
     \\    ASSERT(_stacks_top <= RAM_BASE + 0x{x}, "Weir does not fit in its firmware window. Build with -Doptimize=ReleaseFast or ReleaseSmall, or use a board with more RAM.")
     \\    /DISCARD/ : {{

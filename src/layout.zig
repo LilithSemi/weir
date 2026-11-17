@@ -43,9 +43,12 @@ pub const Layout = struct {
     }
 };
 
+/// The largest number of harts that Weir supports.
+pub const max_harts = 8;
+
 /// The layout for `ram_size` bytes of RAM. `hart_count` sizes the payload
-/// stacks of the small layout. The caller makes sure that `ram_size` is at
-/// least `min_ram`.
+/// stacks and the firmware window of the small layout. The caller makes sure
+/// that `ram_size` is at least `min_ram`.
 pub fn compute(ram_size: u64, hart_count: usize) Layout {
     if (ram_size >= small_below) return .{
         .fw_window = 32 * mib,
@@ -60,7 +63,8 @@ pub fn compute(ram_size: u64, hart_count: usize) Layout {
         .payload_stacks = 8,
         .handoff = 32 * mib - 4 * kib,
     };
-    const fw_window = 4 * mib;
+    // With one hart the image has one payload stack and fits in 2 MiB.
+    const fw_window: u64 = if (hart_count == 1) 2 * mib else 4 * mib;
     const staging = std.mem.alignBackward(u64, ram_size / 2, 2 * mib);
     return .{
         .fw_window = fw_window,
@@ -75,6 +79,14 @@ pub fn compute(ram_size: u64, hart_count: usize) Layout {
         .payload_stacks = hart_count,
         .handoff = fw_window - 64 * kib - 4 * kib,
     };
+}
+
+/// The number of 64 KiB M-mode boot stacks in the image. The reset code
+/// selects a stack by hart ID, so the small layout needs one for each ID up to
+/// the largest. `hart_id_limit` is the largest hart ID plus 1.
+pub fn bootStacks(ram_size: u64, hart_id_limit: usize) usize {
+    if (ram_size >= small_below) return max_harts;
+    return @min(@max(hart_id_limit, 1), max_harts);
 }
 
 const testing = std.testing;
@@ -130,4 +142,21 @@ test "the small layout puts the staging buffer in the top half" {
     const l64 = compute(64 * mib, 1);
     try testing.expectEqual(@as(u64, 32 * mib), l64.staging);
     try testing.expectEqual(@as(u64, 32 * mib), l64.staging_size);
+}
+
+test "the small layout with one hart has a 2 MiB firmware window" {
+    const l = compute(32 * mib, 1);
+    try testing.expectEqual(@as(u64, 2 * mib), l.fw_window);
+    try testing.expectEqual(@as(u64, 2 * mib), l.load_base);
+    try testing.expectEqual(l.fw_window, l.acpi_pool + l.acpi_pool_size);
+    try testing.expectEqual(l.acpi_pool - 4 * kib, l.handoff);
+    try testing.expectEqual(l.handoff, l.imageLimit());
+}
+
+test "the boot stacks follow the largest hart ID in the small layout only" {
+    try testing.expectEqual(@as(usize, 8), bootStacks(256 * mib, 1));
+    try testing.expectEqual(@as(usize, 1), bootStacks(32 * mib, 1));
+    try testing.expectEqual(@as(usize, 1), bootStacks(32 * mib, 0));
+    try testing.expectEqual(@as(usize, 4), bootStacks(32 * mib, 4));
+    try testing.expectEqual(@as(usize, 8), bootStacks(32 * mib, 100));
 }

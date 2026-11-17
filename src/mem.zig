@@ -43,6 +43,8 @@ pub const initrd_base: usize = ram_base + plan().initrd;
 pub const initrd_size: usize = plan().initrd_size;
 /// Number of 1 MiB S-mode payload stacks.
 pub const payload_stack_count: usize = plan().payload_stacks;
+/// Number of M-mode stacks. The reset and trap code select one by hart ID.
+pub const boot_stack_count: usize = layout.bootStacks(soc.ram_size, soc.hart_id_limit);
 
 /// End of RAM from the SoC tree's /memory size.
 pub const ram_end_default = ram_base + soc.ram_size;

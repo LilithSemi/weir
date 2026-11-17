@@ -235,6 +235,13 @@ const harts_arr: [hart_count]u64 = if (has_dt) readHarts(hart_count) else .{0};
 /// Every hart id, in device-tree order. The first is the boot hart.
 pub const harts: []const u64 = &harts_arr;
 
+/// The largest hart id in the tree, plus 1.
+pub const hart_id_limit: usize = blk: {
+    var limit: u64 = 1;
+    for (harts_arr) |id| limit = @max(limit, id +| 1);
+    break :blk @intCast(@min(limit, std.math.maxInt(usize)));
+};
+
 /// A device-tree address cell pair, either one or two cells wide.
 fn readCells(v: []const u8) u64 {
     if (v.len >= 8) return std.mem.readInt(u64, v[0..8], .big);

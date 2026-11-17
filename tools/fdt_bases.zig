@@ -39,6 +39,11 @@ pub const Bases = struct {
     /// -Dfsbl-main-offset and -Dfsbl-main-max flags when the tree carries no
     /// partition map.
     fw_max: u64 = 16 << 20,
+    /// Number of `cpu@` nodes. A tree with none counts as one hart, the same
+    /// as src/soc.zig.
+    hart_count: usize = 1,
+    /// The largest unit address of a `cpu@` node, plus 1.
+    hart_id_limit: usize = 1,
 };
 
 /// Per-node state gathered while descending the tree. A node's `reg` is decoded
@@ -76,10 +81,17 @@ pub fn parse(fdt: *const dtree.Reader, out: *Bases) void {
     // any real tree nests; deeper nodes reuse the deepest slot.
     var stack: [24]Node = @splat(.{});
     var sp: usize = 0;
+    var cpus: usize = 0;
 
     while (iter.next() catch return) |node| {
         switch (node) {
             .begin => |bn| {
+                if (std.mem.startsWith(u8, bn.name, "cpu@")) {
+                    cpus += 1;
+                    out.hart_count = cpus;
+                    const id = std.fmt.parseInt(usize, bn.name[4..], 16) catch 0;
+                    out.hart_id_limit = @max(out.hart_id_limit, id +| 1);
+                }
                 if (sp + 1 < stack.len) sp += 1;
                 stack[sp] = .{
                     .is_mem = std.mem.startsWith(u8, bn.name, "memory") and

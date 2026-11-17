@@ -7,9 +7,9 @@ const csr = @import("arch/riscv/csr.zig");
 const trap = @import("arch/riscv/trap.zig");
 const mode = @import("arch/riscv/mode.zig");
 const hsm = @import("sbi/hsm.zig");
+const mem = @import("mem.zig");
 
 const BOOT_HART = 0;
-const MAX_HARTS = 8;
 
 extern var __bss_start: u8;
 extern var __bss_end: u8;
@@ -18,7 +18,7 @@ extern var __bss_end: u8;
 // supervisor runs on its own virtual stack. An M-mode trap must not save onto
 // that stack. M-mode addresses are physical, so a virtual sp would scribble
 // arbitrary RAM. trapVector swaps to one of these stacks through mscratch.
-var mtrap_stacks: [MAX_HARTS][16 * 1024]u8 align(16) = undefined;
+var mtrap_stacks: [mem.boot_stack_count][16 * 1024]u8 align(16) = undefined;
 
 // The boot hart publishes this after it clears .bss and the hart table is ready.
 var global_ready: u32 = 0;
@@ -61,7 +61,7 @@ export fn weirBoot(hartid: usize, dtb: usize) callconv(.c) noreturn {
     // Every hart installs the trap vector in direct mode, 4-byte aligned. Each
     // also points mscratch at the top of its private M-mode trap stack.
     csr.write("mtvec", @intFromPtr(&trap.trapVector));
-    const stk = &mtrap_stacks[hartid & (MAX_HARTS - 1)];
+    const stk = &mtrap_stacks[hartid % mtrap_stacks.len];
     csr.write("mscratch", @intFromPtr(stk) + stk.len);
 
     if (hartid == BOOT_HART) {
