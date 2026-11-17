@@ -265,6 +265,26 @@ pub fn run(base: usize, freq: u32, out: []u8) usize {
     return tracer.run(freq);
 }
 
+/// Sends one command with no data to the host at `base` and writes its record
+/// to `out`. `resp` is the response type of the controller, 0 to 3. It
+/// returns the number of bytes written.
+pub fn runCommand(base: usize, opcode: u8, resp: u8, arg: u32, out: []u8) usize {
+    var tracer: Tracer(Mmio) = .{ .bus = .{ .base = base }, .out = out };
+    _ = tracer.command(opcode & 0x3f, arg, resp & 3, 0);
+    return tracer.len;
+}
+
+/// The size of the register block of the controller.
+pub const register_span = 0x80;
+
+/// Writes `value` to the register at `offset` when `write` is set, then
+/// reads the register. `offset` is a multiple of 8 below register_span.
+pub fn register(base: usize, offset: u8, write: bool, value: u32) u32 {
+    const bus: Mmio = .{ .base = base };
+    if (write) bus.write(offset, value);
+    return bus.read(offset);
+}
+
 // The DMA engine reads and writes these, so they do not share a cache line
 // with other data.
 var write_block: [512]u8 align(64) = @splat(0);

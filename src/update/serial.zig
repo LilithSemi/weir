@@ -28,7 +28,7 @@ const info_entry_len = 14;
 const request_magic = [2]u8{ 'W', 'U' };
 const reply_magic = [2]u8{ 'w', 'u' };
 
-pub const Command = enum(u8) { ping = 0, info = 1, write = 2, crc = 3, baud = 4, boot = 5, rescan = 6, probe = 7, write_trace = 8, read_trace = 9, _ };
+pub const Command = enum(u8) { ping = 0, info = 1, write = 2, crc = 3, baud = 4, boot = 5, rescan = 6, probe = 7, write_trace = 8, read_trace = 9, sd_command = 10, sd_register = 11, _ };
 
 pub const max_trace_blocks = 8;
 
@@ -50,6 +50,14 @@ pub fn Hooks(comptime Entry: type) type {
         /// number of bytes, or null when the host has no card or `lba` is out
         /// of range.
         read_trace: ?*const fn (index: u8, lba: u64, count: u8, out: []u8) ?usize = null,
+        /// Sends one SD command with no data on SD host `index` and writes
+        /// its record to `out`. It gives the number of bytes, or null when
+        /// the host does not exist.
+        sd_command: ?*const fn (index: u8, opcode: u8, resp: u8, arg: u32, out: []u8) ?usize = null,
+        /// Reads a register of SD host `index`, after a write of `value` when
+        /// `write` is set. It gives null for a host or an offset that does
+        /// not exist.
+        sd_register: ?*const fn (index: u8, offset: u8, write: bool, value: u32) ?u32 = null,
     };
 }
 
@@ -121,6 +129,8 @@ pub fn Engine(comptime Transport: type, comptime Entry: type) type {
                 .probe => self.probe(req),
                 .write_trace => self.writeTrace(req),
                 .read_trace => self.readTrace(req),
+                .sd_command => self.sdCommand(req),
+                .sd_register => self.sdRegister(req),
                 _ => self.reply(.unknown_command, req.seq, 0),
             }
             return false;
@@ -132,6 +142,30 @@ pub fn Engine(comptime Transport: type, comptime Entry: type) type {
             self.devices = service();
             frame[header_len] = @intCast(@min(self.devices.len, 255));
             self.reply(.ok, req.seq, 1);
+        }
+
+        fn sdCommand(self: *Self, req: Request) void {
+            const service = self.hooks.sd_command orelse return self.reply(.unknown_command, req.seq, 0);
+            const args = req.payload;
+            if (args.len != 7 or args[2] > 3) return self.reply(.bad_argument, req.seq, 0);
+            const index = args[0];
+            const opcode = args[1];
+            const resp = args[2];
+            const arg = std.mem.readInt(u32, args[3..7], .little);
+            const len = service(index, opcode, resp, arg, frame[header_len..][0..max_payload]) orelse
+                return self.reply(.bad_argument, req.seq, 0);
+            self.reply(.ok, req.seq, @intCast(len));
+        }
+
+        fn sdRegister(self: *Self, req: Request) void {
+            const service = self.hooks.sd_register orelse return self.reply(.unknown_command, req.seq, 0);
+            const args = req.payload;
+            if (args.len != 7 or args[2] > 1) return self.reply(.bad_argument, req.seq, 0);
+            const value = std.mem.readInt(u32, args[3..7], .little);
+            const result = service(args[0], args[1], args[2] == 1, value) orelse
+                return self.reply(.bad_argument, req.seq, 0);
+            std.mem.writeInt(u32, frame[header_len..][0..4], result, .little);
+            self.reply(.ok, req.seq, 4);
         }
 
         fn probe(self: *Self, req: Request) void {
@@ -966,4 +1000,54 @@ fn traceArgs(buf: *[write_args_len]u8, host: u8, lba: u64, count: u8) []const u8
     std.mem.writeInt(u64, buf[1..9], lba, .little);
     buf[9] = count;
     return buf;
+}
+
+const RawRig = struct {
+    var command: [4]u32 = @splat(0);
+    var access: [4]u32 = @splat(0);
+
+    fn sdCommand(index: u8, opcode: u8, resp: u8, arg: u32, out: []u8) ?usize {
+        if (index != 0) return null;
+        command = .{ index, opcode, resp, arg };
+        @memset(out[0..16], 0xcc);
+        return 16;
+    }
+
+    fn sdRegister(index: u8, offset: u8, write: bool, value: u32) ?u32 {
+        if (index != 0 or offset % 8 != 0) return null;
+        access = .{ index, offset, @intFromBool(write), value };
+        return 0x1234_5678;
+    }
+};
+
+test "sd command and sd register pass their arguments and give the record or the value" {
+    var disks: [3]Disk = @splat(.{});
+    var rig = testRig(&disks);
+    var script: Script = .{};
+    const cmd = @backingInt(Command.sd_command);
+    const reg = @backingInt(Command.sd_register);
+    script.request(cmd, 1, &.{ 0, 13, 1, 0x00, 0x00, 0xaa, 0xaa });
+    script.request(cmd, 2, &.{ 0, 13, 4, 0, 0, 0, 0 });
+    script.request(cmd, 3, &.{ 1, 13, 1, 0, 0, 0, 0 });
+    script.request(reg, 4, &.{ 0, 0x10, 1, 0x1f, 0, 0, 0 });
+    script.request(reg, 5, &.{ 0, 0x11, 0, 0, 0, 0, 0 });
+    script.request(reg, 6, &.{ 0, 0x10, 2, 0, 0, 0, 0 });
+    script.request(reg, 7, &.{ 0, 0x10 });
+    script.boot(8);
+
+    rig.link = .{ .input = script.bytes[0..script.len] };
+    var engine: Engine(FakeLink, TestEntry) = .{
+        .transport = &rig.link,
+        .devices = rig.entries[0..3],
+        .hooks = .{ .sd_command = RawRig.sdCommand, .sd_register = RawRig.sdRegister },
+    };
+    engine.run();
+    try rig.parse();
+
+    const bad = @backingInt(Status.bad_argument);
+    try rig.expectReplies(&.{ .{ ok, 1 }, .{ bad, 2 }, .{ bad, 3 }, .{ ok, 4 }, .{ bad, 5 }, .{ bad, 6 }, .{ bad, 7 }, .{ ok, 8 } });
+    try testing.expectEqualSlices(u32, &.{ 0, 13, 1, 0xaaaa_0000 }, &RawRig.command);
+    try testing.expectEqualSlices(u32, &.{ 0, 0x10, 1, 0x1f }, &RawRig.access);
+    try testing.expectEqualSlices(u8, &@as([16]u8, @splat(0xcc)), rig.replies[0].payload);
+    try testing.expectEqualSlices(u8, &.{ 0x78, 0x56, 0x34, 0x12 }, rig.replies[3].payload);
 }

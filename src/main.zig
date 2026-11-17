@@ -128,7 +128,9 @@ pub fn boot(hartid: usize, dtb: usize) void {
 
     // Bring up boot storage. The boot device is the SD card on the SPI bus. The
     // storage subsystem discovers it here. A later OS image on the card boots
-    // through the disk or boot-manager path.
+    // through the disk or boot-manager path. The update mode comes first, so
+    // that it can see a card before any command went to it.
+    if (config.serial_update) serialUpdate();
     bringUpStorage();
 
     console.out.writeAll("[weir] M-mode bring-up complete, dropping to S-mode\n") catch {};
@@ -498,9 +500,9 @@ fn noBoot() noreturn {
 }
 
 /// Offers the serial update mode for one second. The byte `U` starts it, and
-/// the boot continues when the host sends the boot command.
+/// the boot continues when the host sends the boot command. The mode starts
+/// with no block device. The rescan command finds them.
 fn serialUpdate() void {
-    _ = storage.init();
     // Drop bytes that came before the prompt. The limit covers a UART that
     // always reports data.
     for (0..16) |_| if (console.readByte() == null) break;
@@ -516,12 +518,14 @@ fn serialUpdate() void {
     console.out.writeAll("[update] ready\n") catch {};
     var engine: update_serial.Engine(update_uart.Transport, storage.Device) = .{
         .transport = &link,
-        .devices = storage.devices(),
+        .devices = &.{},
         .hooks = .{
             .rescan = rescanStorage,
             .probe = traceSdHost,
             .write_trace = traceSdWrite,
             .read_trace = traceSdRead,
+            .sd_command = sendSdCommand,
+            .sd_register = accessSdRegister,
         },
     };
     engine.run();
@@ -536,6 +540,18 @@ fn traceSdHost(index: u8, out: []u8) ?usize {
     const hosts = platform.sdhciControllers();
     if (index >= hosts.len) return null;
     return sd_trace.run(hosts[index].base, hosts[index].freq, out);
+}
+
+fn sendSdCommand(index: u8, opcode: u8, resp: u8, arg: u32, out: []u8) ?usize {
+    const hosts = platform.sdhciControllers();
+    if (index >= hosts.len) return null;
+    return sd_trace.runCommand(hosts[index].base, opcode, resp, arg, out);
+}
+
+fn accessSdRegister(index: u8, offset: u8, write: bool, value: u32) ?u32 {
+    const hosts = platform.sdhciControllers();
+    if (index >= hosts.len or offset % 8 != 0 or offset >= sd_trace.register_span) return null;
+    return sd_trace.register(hosts[index].base, offset, write, value);
 }
 
 const SdTarget = struct { base: usize, rca: u32, card_addr: u32 };
@@ -590,8 +606,6 @@ pub fn handoff(hartid: usize, dtb: usize) Handoff {
         }
         console.out.writeAll("[rt] self-test: no variable store\n") catch {};
     }
-
-    if (config.serial_update) serialUpdate();
 
     if (config.boot_manager) {
         console.out.writeAll(
