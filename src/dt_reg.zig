@@ -1,6 +1,6 @@
-//! The register window of a device tree node that is found by its compatible.
-//! The function takes the blob bytes, so the firmware calls it at comptime and
-//! host tests call it at run time.
+//! Facts about a device tree node that is found by its compatible. Each function
+//! takes the blob bytes, so the firmware calls it at comptime and host tests
+//! call it at run time.
 
 const std = @import("std");
 const conduit = @import("conduit");
@@ -15,7 +15,15 @@ const Frame = struct {
     addr_cells: u32 = 2,
     size_cells: u32 = 1,
     reg: []const u8 = &.{},
+    prop: ?[]const u8 = null,
     matched: bool = false,
+};
+
+const Node = struct {
+    reg: []const u8,
+    addr_cells: u32,
+    size_cells: u32,
+    prop: ?[]const u8,
 };
 
 fn readCells(bytes: []const u8) u64 {
@@ -33,9 +41,8 @@ fn hasString(list: []const u8, want: []const u8) bool {
     return false;
 }
 
-/// The first `reg` entry of the first node with this compatible. Null when no
-/// node matches or the entry does not decode.
-pub fn first(dtb: []const u8, compatible: []const u8) ?Region {
+/// The first node with this compatible, with the value of its property `want`.
+fn find(dtb: []const u8, compatible: []const u8, want: []const u8) ?Node {
     var rd = conduit.dtree.Reader.initBuffer(dtb) catch return null;
     var it = rd.nodeIterator();
     var stack: [max_depth]Frame = @splat(.{});
@@ -57,23 +64,44 @@ pub fn first(dtb: []const u8, compatible: []const u8) ?Region {
             } else if (std.mem.eql(u8, p.name, "compatible")) {
                 node.matched = hasString(p.value, compatible);
             }
+            if (std.mem.eql(u8, p.name, want)) node.prop = p.value;
         },
         .end => {
             const node = stack[sp];
             const parent = stack[sp - 1];
             sp -= 1;
             if (!node.matched) continue;
-            if (parent.addr_cells == 0 or parent.addr_cells > 2 or parent.size_cells > 2) return null;
-            const addr_len = parent.addr_cells * cell_bytes;
-            const len = addr_len + parent.size_cells * cell_bytes;
-            if (node.reg.len < len) return null;
             return .{
-                .base = readCells(node.reg[0..addr_len]),
-                .size = readCells(node.reg[addr_len..len]),
+                .reg = node.reg,
+                .addr_cells = parent.addr_cells,
+                .size_cells = parent.size_cells,
+                .prop = node.prop,
             };
         },
     };
     return null;
+}
+
+/// The first `reg` entry of the first node with this compatible. Null when no
+/// node matches or the entry does not decode.
+pub fn first(dtb: []const u8, compatible: []const u8) ?Region {
+    const node = find(dtb, compatible, "") orelse return null;
+    if (node.addr_cells == 0 or node.addr_cells > 2 or node.size_cells > 2) return null;
+    const addr_len = node.addr_cells * cell_bytes;
+    const len = addr_len + node.size_cells * cell_bytes;
+    if (node.reg.len < len) return null;
+    return .{
+        .base = readCells(node.reg[0..addr_len]),
+        .size = readCells(node.reg[addr_len..len]),
+    };
+}
+
+/// A one cell property of the first node with this compatible.
+pub fn propU32(dtb: []const u8, compatible: []const u8, name: []const u8) ?u32 {
+    const node = find(dtb, compatible, name) orelse return null;
+    const value = node.prop orelse return null;
+    if (value.len != cell_bytes) return null;
+    return std.mem.readInt(u32, value[0..cell_bytes], .big);
 }
 
 const testing = std.testing;
@@ -89,6 +117,7 @@ fn tree(gpa: std.mem.Allocator, cells: u32) ![]u8 {
     try b.propU32("#size-cells", cells);
     try b.beginNode("uart@10000000");
     try b.propString("compatible", "ns16550a");
+    try b.propU32("reg-shift", 2);
     try b.propCells("reg", if (cells == 2) &.{ 0, 0x10000000, 0, 0x100 } else &.{ 0x10000000, 0x100 });
     try b.endNode();
     try b.beginNode("unit-id@10050000");
@@ -121,4 +150,13 @@ test "no node with the compatible" {
     defer testing.allocator.free(dtb);
     try testing.expect(first(dtb, "harbor,unit") == null);
     try testing.expect(first(&.{}, "harbor,unit-id") == null);
+}
+
+test "a one cell property" {
+    const dtb = try tree(testing.allocator, 1);
+    defer testing.allocator.free(dtb);
+    try testing.expectEqual(@as(?u32, 2), propU32(dtb, "ns16550a", "reg-shift"));
+    try testing.expectEqual(@as(?u32, null), propU32(dtb, "ns16550a", "reg-io-width"));
+    try testing.expectEqual(@as(?u32, null), propU32(dtb, "harbor,unit-id", "reg-shift"));
+    try testing.expectEqual(@as(?u32, null), propU32(dtb, "ns16550a", "compatible"));
 }

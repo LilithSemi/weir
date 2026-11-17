@@ -19,7 +19,7 @@ pub const Gas = extern struct {
     space_id: u8 = 0,
     bit_width: u8,
     bit_offset: u8 = 0,
-    /// 1: byte access.
+    /// 1: byte access. 3: dword access.
     access_size: u8,
     address: u64 align(1),
 };

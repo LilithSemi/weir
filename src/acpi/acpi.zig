@@ -84,7 +84,10 @@ const max_dsdt_devs = 24;
 var dsdt_devs: [max_dsdt_devs]aml.Device = undefined;
 var dsdt_mem: [max_dsdt_devs][4]aml.MemRegion = undefined;
 var dsdt_irqs: [max_dsdt_devs][8]u32 = undefined;
-var dsdt_props: [max_dsdt_devs][2]aml.Prop = undefined;
+// The most _DSD properties of one device: a UART has a clock, a register
+// shift and a register width.
+const max_props = 3;
+var dsdt_props: [max_dsdt_devs][max_props]aml.Prop = undefined;
 var dsdt_body: [8192]u8 = undefined;
 
 fn digit(v: usize) u8 {
@@ -101,7 +104,7 @@ fn intcHid(m: *const conduit.Match) []const u8 {
 }
 
 /// Add a clock-frequency property from the node's clock, if it has one.
-fn addClock(m: *const conduit.Match, props: *[2]aml.Prop, pi: *usize) void {
+fn addClock(m: *const conduit.Match, props: *[max_props]aml.Prop, pi: *usize) void {
     if (m.clock()) |c| if (c.freq_hz) |hz| {
         props[pi.*] = .{ .key = "clock-frequency", .value = .{ .int = hz } };
         pi.* += 1;
@@ -156,6 +159,11 @@ fn buildDsdt() []u8 {
                     hid = "RSCV0003";
                     qi = addIrqs(m, &dsdt_irqs[n]);
                     addClock(m, &dsdt_props[n], &pi);
+                    if (m.mmio()) |r| if (r.base == soc.uart_base and soc.uart_io_width != 1) {
+                        dsdt_props[n][pi] = .{ .key = "reg-shift", .value = .{ .int = soc.uart_reg_shift } };
+                        dsdt_props[n][pi + 1] = .{ .key = "reg-io-width", .value = .{ .int = soc.uart_io_width } };
+                        pi += 2;
+                    };
                 },
                 // Everything else: the PRP0001 device-tree bridge.
                 else => {
@@ -218,7 +226,7 @@ fn build(dsdt: ?[]const u8) !void {
     var rhct_buf: [512]u8 = undefined;
     const rhct = tables.rhct(&rhct_buf, soc.timebase_hz, soc.cpu_isa, soc.mmu_type);
     const rhct_phys = try b.addTable("RHCT", rhct, 1);
-    const spcr = tables.spcr(soc.uart_base);
+    const spcr = tables.spcr(soc.uart_base, soc.uart_io_width);
     const spcr_phys = try b.addTable("SPCR", std.mem.asBytes(&spcr), 2);
     const xsdt_phys = try b.xsdt(&.{ fadt_phys, madt_phys, rhct_phys, spcr_phys });
     const rsdp_phys = try b.rsdp(xsdt_phys);

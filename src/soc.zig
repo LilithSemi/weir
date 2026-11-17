@@ -100,6 +100,58 @@ pub const uart_base: usize = if (firstMmio(.uart)) |r| @intCast(r.base) else 0x1
 // baud rate wrong. A board declares the rate instead of relying on it.
 pub const uart_clock: usize = if (firstClockHz(.uart)) |hz| @intCast(hz) else 24000000;
 
+const uart_ids = [_][]const u8{ "ns16550a", "ns16550", "snps,dw-apb-uart" };
+
+fn uartProp(name: []const u8) ?u32 {
+    if (!has_dt) return null;
+    @setEvalBranchQuota(8_000_000);
+    for (uart_ids) |id| {
+        if (dt_reg.first(@embedFile("soc_dtb"), id) == null) continue;
+        return dt_reg.propU32(@embedFile("soc_dtb"), id, name);
+    }
+    return null;
+}
+
+/// The shift from a UART register number to its byte offset (`reg-shift`).
+pub const uart_reg_shift: u6 = blk: {
+    const shift = uartProp("reg-shift") orelse 0;
+    if (shift > 3) @compileError("the UART reg-shift in the device tree is over 3");
+    break :blk shift;
+};
+
+/// The bytes in one access to a UART register (`reg-io-width`): 1 or 4.
+pub const uart_io_width: u8 = blk: {
+    const width = uartProp("reg-io-width") orelse 1;
+    if (width != 1 and width != 4) @compileError("the UART reg-io-width in the device tree is not 1 or 4");
+    break :blk width;
+};
+
+/// Access to the UART by register number, for conduit's ns16550a driver.
+pub fn uartMmio() conduit.Mmio {
+    return .{
+        .ctx = @ptrFromInt(uart_base),
+        .base = uart_base,
+        .read_fn = uartRead,
+        .write_fn = uartWrite,
+    };
+}
+
+fn uartRead(ctx: ?*anyopaque, index: usize, _: conduit.Mmio.Width) u64 {
+    const addr = @intFromPtr(ctx) + (index << uart_reg_shift);
+    if (uart_io_width == 4) return @as(u8, @truncate(@as(*volatile u32, @ptrFromInt(addr)).*));
+    return @as(*volatile u8, @ptrFromInt(addr)).*;
+}
+
+fn uartWrite(ctx: ?*anyopaque, index: usize, _: conduit.Mmio.Width, value: u64) void {
+    const addr = @intFromPtr(ctx) + (index << uart_reg_shift);
+    const byte: u8 = @truncate(value);
+    if (uart_io_width == 4) {
+        @as(*volatile u32, @ptrFromInt(addr)).* = byte;
+    } else {
+        @as(*volatile u8, @ptrFromInt(addr)).* = byte;
+    }
+}
+
 /// The 16550 divisor latch value for `baud`. The UART sends at the clock divided
 /// by 16 and by the divisor. Null when the nearest divisor is 0 or over 0xffff.
 pub fn uartDivisor(baud: u32) ?u16 {

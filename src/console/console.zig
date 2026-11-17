@@ -11,7 +11,6 @@
 
 const std = @import("std");
 const conduit = @import("conduit");
-const platform = @import("../platform.zig");
 const soc = @import("soc");
 
 // The console UART and a conduit std.Io stream for each direction. init() fills
@@ -45,7 +44,7 @@ const default_divisor: u16 = soc.uartDivisor(115200) orelse
 pub fn init() void {
     // River sends nothing while the divisor is 0. The init also turns on the
     // FIFOs. QEMU virt ignores the divisor.
-    dev = conduit.driver.ns16550a.bind(conduit.Mmio.direct(platform.uartBase()), .{
+    dev = conduit.driver.ns16550a.bind(soc.uartMmio(), .{
         .divisor = default_divisor,
     });
     ws_out = dev.serial().writer(&out_buf);
@@ -82,7 +81,7 @@ pub fn divisorFor(baud: u32) ?u16 {
 /// sent early stays. Returns false and keeps the rate for a bad baud.
 pub fn setBaud(baud: u32) bool {
     const div = divisorFor(baud) orelse return false;
-    dev = conduit.driver.ns16550a.bind(conduit.Mmio.direct(platform.uartBase()), .{
+    dev = conduit.driver.ns16550a.bind(soc.uartMmio(), .{
         .divisor = div,
         .minimal_init = true,
     });

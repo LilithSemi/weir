@@ -12,6 +12,20 @@ const tx_wait_loops = 0x10000;
 
 const lsr_thre = 0x20;
 
+// 16550 register numbers.
+const dll = 0;
+const dlm = 1;
+const lcr = 3;
+const lsr = 5;
+
+// A UART with 4 byte registers takes word accesses. The value is in the low byte.
+const load = if (cfg.uart_io_width == 4) "lw" else "lbu";
+const store = if (cfg.uart_io_width == 4) "sw" else "sb";
+
+fn offset(comptime register: usize) usize {
+    return register << cfg.uart_reg_shift;
+}
+
 /// The trap vector. start.zig writes its address to mtvec at reset.
 export fn fsblTrapEntry() align(4) callconv(.naked) noreturn {
     asm volatile (entryCode());
@@ -55,12 +69,12 @@ fn entryCode() []const u8 {
         \\
         \\ .Lfsbl_trap_putc:
         \\ li t1, {d}
-        \\ 1: lbu t2, 5(t0)
+        \\ 1: {s} t2, {d}(t0)
         \\ andi t2, t2, {d}
         \\ bnez t2, 2f
         \\ addi t1, t1, -1
         \\ bnez t1, 1b
-        \\ 2: sb a0, 0(t0)
+        \\ 2: {s} a0, 0(t0)
         \\ ret
         \\
         \\ .Lfsbl_trap_puthex:
@@ -90,7 +104,10 @@ fn entryCode() []const u8 {
         printCode(" mtval="),
         printCode("\n[fsbl] halted\n"),
         tx_wait_loops,
+        load,
+        offset(lsr),
         lsr_thre,
+        store,
     });
 }
 
@@ -101,14 +118,21 @@ fn divisorCode(comptime divisor: u16) []const u8 {
     if (divisor == 0) return "";
     return std.fmt.comptimePrint(
         \\ li t1, 0x83
-        \\ sb t1, 3(t0)
-        \\ li t1, 0x{x}
-        \\ sb t1, 0(t0)
-        \\ li t1, 0x{x}
-        \\ sb t1, 1(t0)
+        \\ {[store]s} t1, {[lcr]d}(t0)
+        \\ li t1, 0x{[low]x}
+        \\ {[store]s} t1, {[dll]d}(t0)
+        \\ li t1, 0x{[high]x}
+        \\ {[store]s} t1, {[dlm]d}(t0)
         \\ li t1, 0x03
-        \\ sb t1, 3(t0)
-    , .{ divisor & 0xff, divisor >> 8 });
+        \\ {[store]s} t1, {[lcr]d}(t0)
+    , .{
+        .store = store,
+        .lcr = offset(lcr),
+        .dll = offset(dll),
+        .dlm = offset(dlm),
+        .low = divisor & 0xff,
+        .high = divisor >> 8,
+    });
 }
 
 // Each byte is an immediate, so the text needs no data load. A line feed

@@ -13,7 +13,7 @@ pub const panic = std.debug.FullPanic(panicHandler);
 // TX on a nonzero divisor. The FSBL only sends, so minimal_init is sufficient.
 // run() calls uart_dev.init() to program the baud before real output.
 var uart_dev = conduit.driver.ns16550a.Ns16550a{
-    .mmio = conduit.Mmio.direct(cfg.uart_base),
+    .mmio = cfg.uart_mmio,
     .divisor = cfg.uart_divisor,
     .minimal_init = true,
 };

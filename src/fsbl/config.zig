@@ -8,6 +8,15 @@ const soc = @import("soc");
 /// UART base for early FSBL logging (no DTB parsed at runtime yet at this stage).
 pub const uart_base: usize = soc.uart_base;
 
+/// Access to the UART by register number.
+pub const uart_mmio = soc.uartMmio();
+
+/// The shift from a UART register number to its byte offset.
+pub const uart_reg_shift = soc.uart_reg_shift;
+
+/// The bytes in one access to a UART register: 1 or 4.
+pub const uart_io_width = soc.uart_io_width;
+
 /// Baud divisor for 115200. The Harbor UART sends nothing while the divisor is
 /// 0, so the FSBL must program it before its first print.
 pub const uart_divisor: u16 = soc.uartDivisor(115200) orelse

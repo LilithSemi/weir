@@ -6,11 +6,15 @@
 const std = @import("std");
 const structs = @import("structs.zig");
 
-/// SPCR body: a full 16550 console at `uart_base`, byte-wide registers,
-/// 115200 8N1, polled.
-pub fn spcr(uart_base: u64) structs.SpcrBody {
+/// SPCR body: a full 16550 console at `uart_base`, 115200 8N1, polled. The
+/// registers take accesses of `io_width` bytes, 1 or 4.
+pub fn spcr(uart_base: u64, io_width: u8) structs.SpcrBody {
     return .{
-        .base_address = .{ .bit_width = 8, .access_size = 1, .address = uart_base },
+        .base_address = .{
+            .bit_width = io_width * 8,
+            .access_size = if (io_width == 4) 3 else 1,
+            .address = uart_base,
+        },
         .baud_rate = 7,
         .stop_bits = 1,
     };
@@ -56,13 +60,19 @@ pub fn rhct(buf: []u8, timebase: u64, isa: []const u8, mmu_type: u8) []const u8 
 }
 
 test "the SPCR body describes a polled 16550 at the UART base" {
-    const body = spcr(0x1000_0000);
+    const body = spcr(0x1000_0000, 1);
     try std.testing.expectEqualSlices(u8, &.{
         0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x00, 0x01, 0x00, 0x00, 0x00,
         0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x07, 0x00, 0x01, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     }, std.mem.asBytes(&body));
+}
+
+test "the SPCR body of a UART with 4 byte registers has dword access" {
+    const body = spcr(0x1000_0000, 4);
+    try std.testing.expectEqual(@as(u8, 32), body.base_address.bit_width);
+    try std.testing.expectEqual(@as(u8, 3), body.base_address.access_size);
 }
 
 test "the RHCT body holds an ISA node, an MMU node and a hart node that names both" {

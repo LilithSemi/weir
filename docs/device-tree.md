@@ -37,6 +37,11 @@ MHz, the QEMU rate, when the tree omits it. The UART baud divisor comes from the
 UART node's `clock-frequency` the same way. The UART is a 16550, so the divisor
 is the clock divided by 16 times the baud.
 
+Weir also reads `reg-shift` and `reg-io-width` from the UART node. A register
+is at its number shifted left by `reg-shift`, and each access has
+`reg-io-width` bytes, 1 or 4. Without them the registers are 1 byte apart and
+take byte accesses.
+
 ## Flash partitions
 
 The flash node holds a `fixed-partitions` subnode with `partition@NNN` leaves.
