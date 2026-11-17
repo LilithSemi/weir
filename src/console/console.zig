@@ -52,7 +52,9 @@ pub fn init() void {
     ws_in = dev.serial().reader(&in_buf);
 }
 
+const rbr = 0;
 const lsr = 5;
+const lsr_dr = 0x01;
 const lsr_temt = 0x40;
 
 /// Returns one received byte, or null when no byte waits. Only the serial
@@ -60,6 +62,16 @@ const lsr_temt = 0x40;
 pub fn readByte() ?u8 {
     var b: [1]u8 = undefined;
     return if (dev.read(&b) == 1) b[0] else null;
+}
+
+/// Moves the bytes that wait in the UART to `buf` and returns their number.
+/// It reads the registers with no driver call, for a host that sends fast.
+pub fn readInto(buf: []u8) usize {
+    var count: usize = 0;
+    while (count < buf.len and soc.uartRegister(lsr) & lsr_dr != 0) : (count += 1) {
+        buf[count] = soc.uartRegister(rbr);
+    }
+    return count;
 }
 
 /// Sends `bytes` with no LF to CRLF change.

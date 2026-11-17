@@ -11,7 +11,7 @@ const polls_per_clock_read = 64;
 
 pub const Transport = struct {
     pub fn readByte(self: *Transport, ms: u32) ?u8 {
-        // The UART holds one byte, so most polls must not read the clock.
+        // A clock read is slow, so most polls must not read the clock.
         if (console.readByte()) |b| return b;
         const end = self.now() + ms;
         while (true) {
@@ -20,6 +20,32 @@ pub const Transport = struct {
             }
             if (self.now() >= end) return null;
         }
+    }
+
+    /// Fills `buf`. It gives false when no byte comes for `ms` milliseconds.
+    /// The loop reads the clock only when the UART is empty, so it keeps up
+    /// with a fast host.
+    pub fn readAll(self: *Transport, buf: []u8, ms: u32) bool {
+        var got: usize = 0;
+        var idle: u32 = 0;
+        var end: u64 = 0;
+        while (got < buf.len) {
+            const count = console.readInto(buf[got..]);
+            if (count != 0) {
+                got += count;
+                idle = 0;
+                continue;
+            }
+            idle += 1;
+            if (idle % polls_per_clock_read != 0) continue;
+            const time = self.now();
+            if (idle == polls_per_clock_read) {
+                end = time + ms;
+            } else if (time >= end) {
+                return false;
+            }
+        }
+        return true;
     }
 
     pub fn write(_: *Transport, bytes: []const u8) void {

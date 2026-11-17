@@ -3,7 +3,8 @@
 //! transport, so host tests drive it with a fake. See docs/serial-update.md.
 //!
 //! A transport has these methods:
-//! `readByte(ms: u32) ?u8`, `write(bytes: []const u8) void`, `drain() void`,
+//! `readByte(ms: u32) ?u8`, `readAll(buf: []u8, ms: u32) bool`,
+//! `write(bytes: []const u8) void`, `drain() void`,
 //! `now() u64` in milliseconds, `baudValid(baud: u32) bool` and
 //! `setBaud(baud: u32) bool`.
 
@@ -319,9 +320,7 @@ pub fn Engine(comptime Transport: type, comptime Entry: type) type {
                 }
                 const len = std.mem.readInt(u16, frame[4..6], .little);
                 if (len > max_payload) continue :search;
-                for (frame[header_len..][0 .. len + crc_len]) |*slot| {
-                    slot.* = self.transport.readByte(gap_ms) orelse continue :search;
-                }
+                if (!self.transport.readAll(frame[header_len..][0 .. len + crc_len], gap_ms)) continue :search;
                 const sent = std.mem.readInt(u32, frame[header_len + len ..][0..crc_len], .little);
                 if (sent != std.hash.Crc32.hash(frame[2 .. header_len + len])) return .{ .bad_crc = frame[3] };
                 return .{ .request = .{ .code = frame[2], .seq = frame[3], .payload = frame[header_len..][0..len] } };
@@ -414,6 +413,11 @@ const FakeLink = struct {
         self.waited = 0;
         self.pos += 1;
         return if (next.baud == self.baud) next.value else next.value ^ 0xa5;
+    }
+
+    pub fn readAll(self: *FakeLink, buf: []u8, ms: u32) bool {
+        for (buf) |*slot| slot.* = self.readByte(ms) orelse return false;
+        return true;
     }
 
     pub fn write(self: *FakeLink, bytes: []const u8) void {

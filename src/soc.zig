@@ -136,6 +136,11 @@ pub fn uartMmio() conduit.Mmio {
     };
 }
 
+/// Reads the UART register with the number `index`.
+pub inline fn uartRegister(index: usize) u8 {
+    return @truncate(uartRead(@ptrFromInt(uart_base), index, .byte));
+}
+
 fn uartRead(ctx: ?*anyopaque, index: usize, _: conduit.Mmio.Width) u64 {
     const addr = @intFromPtr(ctx) + (index << uart_reg_shift);
     if (uart_io_width == 4) return @as(u8, @truncate(@as(*volatile u32, @ptrFromInt(addr)).*));
