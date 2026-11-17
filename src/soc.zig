@@ -8,6 +8,7 @@
 const std = @import("std");
 const conduit = @import("conduit");
 const flash_dt = @import("flash_dt.zig");
+const dt_reg = @import("dt_reg.zig");
 const has_dt = @import("build_options").has_dtb;
 
 // One matcher per SoC device class that Weir bakes in. conduit walks the
@@ -193,6 +194,13 @@ pub const vars_partition_index: ?usize = flash_dt.findPartition(flash_partitions
 
 /// The second bank of a `cfi-flash` node (QEMU virt). The variable store uses it.
 pub const cfi_vars_base: ?usize = if (flashScan().cfiBank(1)) |r| @intCast(r.base) else null;
+
+/// The Harbor unit ID block. Null when the tree has none.
+pub const unit_id_base: ?usize = if (has_dt) blk: {
+    @setEvalBranchQuota(8_000_000);
+    const r = dt_reg.first(@embedFile("soc_dtb"), "harbor,unit-id") orelse break :blk null;
+    break :blk @intCast(r.base);
+} else null;
 
 const tpm_mmio = firstMmio(.tpm);
 pub const tpm_present: bool = tpm_mmio != null;

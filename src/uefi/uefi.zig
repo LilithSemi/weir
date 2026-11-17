@@ -21,6 +21,7 @@ const pe = @import("../loader/pe.zig");
 const fat = @import("../fs/fat.zig");
 const soc = @import("soc");
 const smbios = @import("../smbios/smbios.zig");
+const unit_id = @import("../drivers/unit_id.zig");
 const acpi_qemu = @import("../acpi/qemu.zig");
 const platform = @import("../platform.zig");
 const mem = @import("../mem.zig");
@@ -1413,7 +1414,7 @@ pub fn prepare(dtb: usize, hartid: usize, image_base: usize, image_size: usize) 
     config_count += 1;
 
     // Publish SMBIOS/DMI so the OS sees real board info (dmidecode, /sys dmi).
-    smbios.build(RAM_END - RAM_BASE);
+    smbios.build(RAM_END - RAM_BASE, unit_id.read());
     config_table[config_count] = .{
         .vendor_guid = smbios.SMBIOS3_GUID,
         .vendor_table = smbios.entryPoint(),

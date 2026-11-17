@@ -46,10 +46,12 @@ var entry: structs.EntryPoint align(16) = .{
     .table_address = 0,
 };
 
-/// Finish the tables for a machine with `ram_bytes` of RAM. Safe to call again.
+/// Finish the tables for a machine with `ram_bytes` of RAM. A unit with no ID
+/// keeps the default serial number and UUID. Safe to call again.
 /// Call before publishing the config table.
-pub fn build(ram_bytes: u64) void {
+pub fn build(ram_bytes: u64, unit_id: ?u64) void {
     tbl.patchRam(comptime assembled(), &table, ram_bytes);
+    if (unit_id) |id| tbl.patchUnitId(comptime assembled(), &table, id);
     tbl.seal(&entry, @intFromPtr(&table));
 }
 

@@ -48,7 +48,11 @@ and Weir reports the RAM size it finds at boot as the module size. Only one
 memory can take its size from boot.
 
 The serial number and the UUID are different for each unit, so they are not in
-the file.
+the file. When the device tree has a `harbor,unit-id` node and the block has a
+valid ID, the type 1 serial number is the ID as 16 hexadecimal digits. The UUID
+is then `72696557-HHHH-8000-8000-LLLLLLLLLLLL`, where `HHHH` is the high 16
+bits of the ID and `LLLLLLLLLLLL` is the low 48 bits. Without an ID, the serial
+number is 16 zeros and the UUID is a fixed value.
 
 ## RISC-V note
 

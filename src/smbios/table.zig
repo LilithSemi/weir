@@ -27,6 +27,10 @@ pub const Assembled = struct {
     runtime_array: ?usize,
     /// Offset of the type 17 structure whose size is the RAM size at boot.
     runtime_device: ?usize,
+    /// Offset of the type 1 structure.
+    system: usize,
+    /// Offset of the 16 serial number characters of type 1.
+    system_serial: usize,
 };
 
 const handle = struct {
@@ -41,7 +45,7 @@ const handle = struct {
     const end: u16 = 0x7f00;
 };
 
-/// A fixed, recognizable UUID.
+/// The UUID of a board with no unit ID.
 const default_uuid = [16]u8{
     0x57, 0x65, 0x69, 0x72, 0x00, 0x01, 0x40, 0x00,
     0x80, 0x00, 0x52, 0x69, 0x76, 0x65, 0x72, 0x00,
@@ -105,6 +109,8 @@ pub fn assemble(comptime info: BoardInfo, comptime fw: Firmware) Assembled {
     @setEvalBranchQuota(200_000);
     var a: Assembler = .{};
     const product = info.product orelse fw.soc_model;
+    var system_off: usize = 0;
+    var system_serial: usize = 0;
 
     {
         var s: Strings = .{};
@@ -126,12 +132,16 @@ pub fn assemble(comptime info: BoardInfo, comptime fw: Firmware) Assembled {
             .manufacturer = s.add(info.vendor),
             .product = s.add(product),
             .version = s.add(info.version),
-            .serial = s.add(&system_serial_slot),
+            .serial = serial: {
+                system_serial = @sizeOf(structs.System) + s.bytes.len;
+                break :serial s.add(&system_serial_slot);
+            },
             .uuid = default_uuid,
             .sku = s.add(info.sku),
             .family = s.add(info.family),
         };
-        _ = a.add(system, s);
+        system_off = a.add(system, s);
+        system_serial += system_off;
     }
     {
         var s: Strings = .{};
@@ -242,6 +252,8 @@ pub fn assemble(comptime info: BoardInfo, comptime fw: Firmware) Assembled {
         .bytes = a.bytes,
         .runtime_array = if (capacity == null) array_off else null,
         .runtime_device = runtime_device,
+        .system = system_off,
+        .system_serial = system_serial,
     };
 }
 
@@ -260,6 +272,18 @@ pub fn patchRam(comptime a: Assembled, table: *[a.bytes.len]u8, ram_bytes: u64) 
     if (a.runtime_device) |off| {
         view(structs.MemoryDevice, table, off).size_mb = deviceSizeMb(ram_bytes);
     }
+}
+
+/// Write the serial number and the UUID of a unit. The UUID is version 8 of
+/// RFC 9562, in the byte order of SMBIOS: the first 4 bytes stay, then come
+/// the high 16 bits of the ID, and the node field has the low 48 bits.
+pub fn patchUnitId(comptime a: Assembled, table: *[a.bytes.len]u8, id: u64) void {
+    _ = std.fmt.bufPrint(table[a.system_serial..][0..system_serial_slot.len], "{X:0>16}", .{id}) catch unreachable;
+    const uuid = &view(structs.System, table, a.system).uuid;
+    std.mem.writeInt(u16, uuid[4..6], @truncate(id >> 48), .little);
+    std.mem.writeInt(u16, uuid[6..8], 0x8000, .little);
+    uuid[8..10].* = .{ 0x80, 0x00 };
+    std.mem.writeInt(u48, uuid[10..16], @truncate(id), .big);
 }
 
 /// Point the entry point at the table and set its checksum.
@@ -522,4 +546,29 @@ test "an empty CPU model falls back to the device tree model" {
     try std.testing.expectEqual(@as(u8, 3), cpu.formatted[0x10]); // version string number
     try std.testing.expectEqualStrings("River Core", cpu.string(3));
     try std.testing.expectEqual(@as(u8, 4), cpu.formatted[0x23]); // core count
+}
+
+test "a unit ID sets the serial number and a version 8 UUID" {
+    const a = comptime assemble(.{}, test_fw);
+    var table = a.bytes[0..a.bytes.len].*;
+    patchUnitId(a, &table, 0x01ab_cdef_0123_4567);
+
+    const system = find(&table, 1, 0).?;
+    try std.testing.expectEqualStrings("01ABCDEF01234567", system.string(4));
+    try std.testing.expectEqualStrings("0", system.string(5));
+    try std.testing.expectEqualSlices(u8, &.{
+        0x57, 0x65, 0x69, 0x72, 0xab, 0x01, 0x00, 0x80,
+        0x80, 0x00, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67,
+    }, system.formatted[@offsetOf(structs.System, "uuid")..][0..16]);
+}
+
+test "a unit ID goes to the serial slot of a board with its own strings" {
+    const a = comptime assemble(.{ .vendor = "Acme", .product = "Board 7", .version = "" }, test_fw);
+    var table = a.bytes[0..a.bytes.len].*;
+    patchUnitId(a, &table, 0x1f);
+
+    const system = find(&table, 1, 0).?;
+    try std.testing.expectEqualStrings("Acme", system.string(1));
+    try std.testing.expectEqualStrings("Board 7", system.string(2));
+    try std.testing.expectEqualStrings("000000000000001F", system.string(3));
 }
