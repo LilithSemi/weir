@@ -269,6 +269,15 @@ pub const unit_id_base: ?usize = if (has_dt) blk: {
     break :blk @intCast(r.base);
 } else null;
 
+pub const Framebuffer = struct { base: usize, size: usize };
+
+/// The memory of a `simple-framebuffer` node. Null when the tree has none.
+pub const framebuffer: ?Framebuffer = if (has_dt) blk: {
+    @setEvalBranchQuota(8_000_000);
+    const r = dt_reg.first(@embedFile("soc_dtb"), "simple-framebuffer") orelse break :blk null;
+    break :blk .{ .base = @intCast(r.base), .size = @intCast(r.size) };
+} else null;
+
 const tpm_mmio = firstMmio(.tpm);
 pub const tpm_present: bool = tpm_mmio != null;
 pub const tpm_base: usize = if (tpm_mmio) |r| @intCast(r.base) else 0x04000000;

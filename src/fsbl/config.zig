@@ -30,6 +30,9 @@ pub const dram_base: usize = soc.ram_base;
 /// `dram_base + dram_size` is the first byte memtest must not touch.
 pub const dram_size: usize = soc.ram_size;
 
+/// The memory of the display, which shows it from reset.
+pub const framebuffer = soc.framebuffer;
+
 /// The hart count from the device tree. It selects the handoff page.
 pub const hart_count: usize = soc.hart_count;
 

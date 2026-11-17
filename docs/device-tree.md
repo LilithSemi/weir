@@ -118,6 +118,15 @@ bank for the store and needs no partition. Store bank 0 is the first 256 KiB
 erase block of that flash bank and store bank 1 is the second. Weir uses 128 KiB
 of each block.
 
+## Framebuffer
+
+When the tree has a `simple-framebuffer` node, the FSBL writes zeros to the
+memory of its first `reg` entry after the memory bring-up and prints
+`[fsbl] framebuffer: cleared`. A display that shows this memory from reset is
+then black until an OS draws on it. Keep this memory out of the `/memory` node.
+Weir does not read `/reserved-memory`, so memory in `/memory` is used by the
+firmware and given to the OS.
+
 ## On-chip SRAM
 
 An `mmio-sram` node gives the FSBL a scratch window for its stack and writable

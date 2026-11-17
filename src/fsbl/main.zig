@@ -38,6 +38,13 @@ pub fn run(hartid: usize, dtb: usize) noreturn {
         while (true) asm volatile ("wfi");
     }
 
+    // The display shows its memory from reset. Make it black. The base and
+    // the size are multiples of a page, so word stores cover it.
+    if (cfg.framebuffer) |fb| {
+        @memset(@as([*]volatile u64, @ptrFromInt(fb.base))[0 .. fb.size / @sizeOf(u64)], 0);
+        con.writeAll("[fsbl] framebuffer: cleared\n") catch {};
+    }
+
     const len = flash.loadMain(con) orelse {
         con.writeAll("[fsbl] FATAL: could not load main firmware\n") catch {};
         while (true) asm volatile ("wfi");
