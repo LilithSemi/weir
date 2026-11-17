@@ -278,6 +278,43 @@ pub const framebuffer: ?Framebuffer = if (has_dt) blk: {
     break :blk .{ .base = @intCast(r.base), .size = @intCast(r.size) };
 } else null;
 
+pub const Display = struct {
+    /// The register block.
+    base: usize,
+    /// The framebuffer of a build with a fixed one, from `memory-region`.
+    fixed: ?Framebuffer,
+};
+
+const display_id = "harbor,display";
+
+const display_count: usize = if (has_dt) blk: {
+    @setEvalBranchQuota(8_000_000);
+    break :blk dt_reg.count(@embedFile("soc_dtb"), display_id);
+} else 0;
+
+const displays_arr: [display_count]Display = blk: {
+    @setEvalBranchQuota(8_000_000);
+    var arr: [display_count]Display = undefined;
+    for (&arr, 0..) |*display, i| {
+        const dtb = @embedFile("soc_dtb");
+        const reg = dt_reg.nth(dtb, display_id, i) orelse
+            @compileError("a display node in the device tree has a reg that does not decode");
+        const region: ?dt_reg.Region = if (dt_reg.nthPropU32(dtb, display_id, i, "memory-region")) |phandle|
+            dt_reg.byPhandle(dtb, phandle) orelse
+                @compileError("the memory-region of a display node names no node with a reg")
+        else
+            null;
+        display.* = .{
+            .base = @intCast(reg.base),
+            .fixed = if (region) |r| .{ .base = @intCast(r.base), .size = @intCast(r.size) } else null,
+        };
+    }
+    break :blk arr;
+};
+
+/// Every Harbor display, in device tree order.
+pub const displays: []const Display = &displays_arr;
+
 const tpm_mmio = firstMmio(.tpm);
 pub const tpm_present: bool = tpm_mmio != null;
 pub const tpm_base: usize = if (tpm_mmio) |r| @intCast(r.base) else 0x04000000;

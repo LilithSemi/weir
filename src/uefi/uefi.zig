@@ -21,6 +21,7 @@ const pe = @import("../loader/pe.zig");
 const fat = @import("../fs/fat.zig");
 const soc = @import("soc");
 const smbios = @import("../smbios/smbios.zig");
+const display = @import("display.zig");
 const unit_id = @import("../drivers/unit_id.zig");
 const acpi_qemu = @import("../acpi/qemu.zig");
 const platform = @import("../platform.zig");
@@ -1267,6 +1268,7 @@ pub fn prepare(dtb: usize, hartid: usize, image_base: usize, image_size: usize) 
         const e = std.mem.alignForward(usize, r.base + r.len, 4096);
         if (poolPart(s, e)) |p| _ = pages.allocAt(p.start, p.end - p.start, boot_data_tag);
     }
+    display.setup(&pages, &pool);
 
     // Simple Text Output: real output, the rest succeed as no-ops.
     con_out_mode = .{

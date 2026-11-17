@@ -151,6 +151,11 @@ A new value of `FlashLock` takes effect at the next boot.
 - `EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL` and `EFI_SIMPLE_TEXT_INPUT_PROTOCOL` over the
   console UART.
 - `RISCV_EFI_BOOT_PROTOCOL`, which reports the boot hart ID.
+- `EFI_GRAPHICS_OUTPUT_PROTOCOL`, one for each display that has a framebuffer.
+  Each has one mode, the mode of the display. The framebuffer of an r5g6b5
+  display has the bit mask pixel format. The 32 bit formats are blue, green,
+  red, reserved. All four block transfer operations work. See
+  [device-tree.md](device-tree.md#displays).
 
 ## Configuration tables
 

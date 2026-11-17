@@ -25,6 +25,7 @@ clock rate from `clock-frequency` where it needs one.
 | RTC | `google,goldfish-rtc` | wall clock |
 | SD/MMC host | `harbor,sdhci`, `harbor,sdio` | block base, clock |
 | SPI master | `harbor,spi`, `midstall,harbor-spi` | SPI base for an SD card |
+| Display | `harbor,display` | register base, fixed framebuffer |
 
 The console UART, the CLINT, and the memory node are the minimum a board needs.
 An absent class turns its feature off or falls back to a default.
@@ -118,14 +119,37 @@ bank for the store and needs no partition. Store bank 0 is the first 256 KiB
 erase block of that flash bank and store bank 1 is the second. Weir uses 128 KiB
 of each block.
 
-## Framebuffer
+## Displays
+
+Weir uses each node with the compatible `harbor,display`, in the order of the
+tree. It reads the screen size, the stride and the pixel format from the
+registers of the display, so the node needs only its `reg`.
+
+A display node with no `memory-region` gets its framebuffer from Weir. Weir
+takes the memory from the top of RAM when the boot manager starts, writes
+zeros to it, gives the address to the display and turns the display on. The
+EFI memory map reports the framebuffer as reserved memory, so it stays in use
+after the OS starts. Each display has its own framebuffer.
+
+A display node with a `memory-region` has a fixed framebuffer: the first `reg`
+entry of the node that the phandle names. Weir uses that memory and allocates
+none. Keep a fixed framebuffer out of the `/memory` node. Weir does not read
+`/reserved-memory` for other purposes, so memory in `/memory` is used by the
+firmware and given to the OS.
+
+Weir draws the formats r5g6b5, x8r8g8b8 and a8r8g8b8. A display with another
+format gets no framebuffer. Each display with a framebuffer has a graphics
+output protocol, see [uefi.md](uefi.md#protocols). Weir prints one line for
+each:
+
+```
+[display] 640x480 r5g6b5, framebuffer at 81f10000
+```
 
 When the tree has a `simple-framebuffer` node, the FSBL writes zeros to the
 memory of its first `reg` entry after the memory bring-up and prints
 `[fsbl] framebuffer: cleared`. A display that shows this memory from reset is
-then black until an OS draws on it. Keep this memory out of the `/memory` node.
-Weir does not read `/reserved-memory`, so memory in `/memory` is used by the
-firmware and given to the OS.
+then black until Weir or an OS draws on it.
 
 ## On-chip SRAM
 

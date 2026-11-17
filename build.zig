@@ -242,6 +242,8 @@ pub fn build(b: *std.Build) void {
         "src/acpi/madt.zig",
         "src/acpi/tables.zig",
         "src/boot/extlinux.zig",
+        "src/display/gop.zig",
+        "src/display/harbor.zig",
         "src/flash/cfi.zig",
         "src/flash/spi_nor.zig",
         "src/layout.zig",
