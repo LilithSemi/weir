@@ -248,9 +248,13 @@ fn dbcn(fid: usize, args: [6]usize) Ret {
 
 fn srst(fid: usize, args: [6]usize) Ret {
     if (fid != 0) return .{ .err = SBI_ERR_NOT_SUPPORTED };
-    return switch (args[0]) {
-        srst_shutdown => reset.shutdown(),
-        srst_cold_reboot, srst_warm_reboot => reset.reboot(),
-        else => .{ .err = SBI_ERR_INVALID_PARAM },
+    const name = switch (args[0]) {
+        srst_shutdown => "shutdown",
+        srst_cold_reboot => "cold",
+        srst_warm_reboot => "warm",
+        else => return .{ .err = SBI_ERR_INVALID_PARAM },
     };
+    console.out.print("[weir] srst: type={s} reason={d}\n", .{ name, args[1] }) catch {};
+    if (args[0] == srst_shutdown) reset.shutdown();
+    reset.reboot();
 }

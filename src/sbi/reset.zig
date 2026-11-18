@@ -54,6 +54,8 @@ pub fn restartHart() noreturn {
 }
 
 fn write(device: soc.Syscon) void {
+    // A reset drops the bytes that the UART did not send yet.
+    while (!console.txEmpty()) {}
     const register: *volatile u32 = @ptrFromInt(device.address);
     register.* = device.value;
 }

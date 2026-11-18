@@ -92,6 +92,9 @@ The `seal` operation applies the store rules for the time after
 `SBI_ERR_INVALID_PARAM`. The legacy `shutdown` call does a shutdown. The EFI
 `ResetSystem` service makes this call.
 
+Weir prints the type and the reason of each call, for example
+`[weir] srst: type=cold reason=0`, and sends the line before the reset.
+
 Weir uses the reset device of the device tree when the tree has one. See
 [device-tree.md](device-tree.md#reset-and-power).
 
