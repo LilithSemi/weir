@@ -121,9 +121,9 @@ of each block.
 
 ## Reset and power
 
-Weir reads the `syscon-reboot` and `syscon-poweroff` nodes. Each has a `regmap`
-phandle to a node with a `reg`, an `offset` and a `value`. Weir writes the value
-as a 32-bit word to the register at that offset. Weir does not use the `mask`
+Weir reads the `syscon-reboot` and `syscon-poweroff` nodes. Each has an `offset` and a `value`. The registers are in the node that the
+`regmap` phandle names. Without a `regmap`, they are in the parent node. Weir
+writes the value as a 32-bit word to the register at that offset. Weir does not use the `mask`
 property.
 
 A tree without these nodes is correct for a board with no such device. Then

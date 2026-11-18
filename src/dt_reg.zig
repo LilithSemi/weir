@@ -25,6 +25,8 @@ const Node = struct {
     addr_cells: u32,
     size_cells: u32,
     prop: ?[]const u8,
+    /// The first `reg` entry of the parent node.
+    parent: ?Region = null,
 
     fn region(node: Node) ?Region {
         if (node.addr_cells == 0 or node.addr_cells > 2 or node.size_cells > 2) return null;
@@ -103,11 +105,19 @@ fn find(dtb: []const u8, match: Match, want: []const u8) ?Node {
                 .phandle => |want_handle| node.phandle == want_handle,
             };
             if (!hit) continue;
+            const above: Frame = if (sp > 0) stack[sp - 1] else .{};
+            const parent_node: Node = .{
+                .reg = parent.reg,
+                .addr_cells = above.addr_cells,
+                .size_cells = above.size_cells,
+                .prop = null,
+            };
             return .{
                 .reg = node.reg,
                 .addr_cells = parent.addr_cells,
                 .size_cells = parent.size_cells,
                 .prop = node.prop,
+                .parent = parent_node.region(),
             };
         },
     };
@@ -138,6 +148,12 @@ pub fn count(dtb: []const u8, compatible: []const u8) usize {
 pub fn byPhandle(dtb: []const u8, phandle: u32) ?Region {
     const node = find(dtb, .{ .phandle = phandle }, "") orelse return null;
     return node.region();
+}
+
+/// The first `reg` entry of the parent of the first node with this compatible.
+pub fn parentOf(dtb: []const u8, compatible: []const u8) ?Region {
+    const node = find(dtb, .{ .compatible = .{ .id = compatible, .index = 0 } }, "") orelse return null;
+    return node.parent;
 }
 
 /// A one cell property of the first node with this compatible.
@@ -221,6 +237,29 @@ test "a one cell property" {
     try testing.expectEqual(@as(?u32, null), propU32(dtb, "ns16550a", "reg-io-width"));
     try testing.expectEqual(@as(?u32, null), propU32(dtb, "harbor,unit-id", "reg-shift"));
     try testing.expectEqual(@as(?u32, null), propU32(dtb, "ns16550a", "compatible"));
+}
+
+test "the parent of a node" {
+    var b = conduit.dtree.Builder.init(testing.allocator);
+    defer b.deinit();
+    try b.beginNode("");
+    try b.propU32("#address-cells", 1);
+    try b.propU32("#size-cells", 1);
+    try b.beginNode("reset@10009000");
+    try b.propCells("reg", &.{ 0x10009000, 0x1000 });
+    try b.beginNode("reboot");
+    try b.propString("compatible", "syscon-reboot");
+    try b.endNode();
+    try b.endNode();
+    try b.beginNode("poweroff");
+    try b.propString("compatible", "syscon-poweroff");
+    try b.endNode();
+    try b.endNode();
+    const dtb = try b.finish();
+    defer testing.allocator.free(dtb);
+    try testing.expectEqual(@as(u64, 0x10009000), parentOf(dtb, "syscon-reboot").?.base);
+    try testing.expect(parentOf(dtb, "syscon-poweroff") == null);
+    try testing.expect(parentOf(dtb, "syscon-none") == null);
 }
 
 fn displayTree(gpa: std.mem.Allocator) ![]u8 {

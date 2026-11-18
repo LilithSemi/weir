@@ -274,9 +274,14 @@ pub const Syscon = struct { address: usize, value: u32 };
 fn syscon(comptime id: []const u8) ?Syscon {
     @setEvalBranchQuota(8_000_000);
     const dtb = @embedFile("soc_dtb");
-    const handle = dt_reg.propU32(dtb, id, "regmap") orelse return null;
-    const regmap = dt_reg.byPhandle(dtb, handle) orelse
-        @compileError("the regmap of the " ++ id ++ " node names no node with a reg");
+    if (dt_reg.count(dtb, id) == 0) return null;
+    // Without a regmap, the parent node has the registers.
+    const regmap = if (dt_reg.propU32(dtb, id, "regmap")) |handle|
+        dt_reg.byPhandle(dtb, handle) orelse
+            @compileError("the regmap of the " ++ id ++ " node names no node with a reg")
+    else
+        dt_reg.parentOf(dtb, id) orelse
+            @compileError("the " ++ id ++ " node has no regmap and no parent with a reg");
     return .{
         .address = @intCast(regmap.base + (dt_reg.propU32(dtb, id, "offset") orelse 0)),
         .value = dt_reg.propU32(dtb, id, "value") orelse return null,
