@@ -201,6 +201,7 @@ fn readImage(port: *Port, client: *Client, url: http.Url) !void {
     }
     var fetcher: fetch.Fetcher(Client) = .{ .conn = client, .url = url, .open = true };
     defer fetcher.drop();
+    errdefer console.err.print("[net] the last piece stopped after {d} bytes\n", .{fetcher.arrived}) catch {};
     errdefer if (fetcher.status != 0)
         console.err.print("[net] the server gave status {d}, it must give 206 for a range\n", .{fetcher.status}) catch {};
 

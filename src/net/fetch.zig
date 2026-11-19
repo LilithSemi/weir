@@ -4,7 +4,8 @@
 //! new connection.
 //!
 //! The connection type has `connect(host, port, ms)`, `send(bytes)`,
-//! `recv(dest, ms) usize` and `close()`, as the client in esp_at.zig has.
+//! `recv(dest, ms) usize`, `recvSome(dest, ms) usize` and `close()`, as the
+//! client in esp_at.zig has.
 
 const std = @import("std");
 const esp_at = @import("esp_at.zig");
@@ -24,6 +25,8 @@ pub fn Fetcher(comptime Conn: type) type {
         retries: u32 = 0,
         /// The status of the last reply that was not a range.
         status: u16 = 0,
+        /// The bytes of the last piece that arrived.
+        arrived: usize = 0,
 
         const Self = @This();
 
@@ -82,26 +85,30 @@ pub fn Fetcher(comptime Conn: type) type {
                 error.ReadFailed => return in.err.?,
                 else => return error.Malformed,
             };
+
+            // The body arrives while the head is still in the buffer, and the
+            // UART holds only a few bytes. So the body is read first, with no
+            // other work, and the head is examined after it.
+            const start = in.interface.buffered();
+            self.arrived = @min(start.len, dest.len);
+            @memcpy(dest[0..self.arrived], start[0..self.arrived]);
+            const body: esp_at.Error!void = while (self.arrived < dest.len) {
+                self.arrived += self.conn.recv(dest[self.arrived..], reply_ms) catch |err| break err;
+            };
+
             const head = std.http.Client.Response.Head.parse(head_bytes) catch return error.Malformed;
             if (head.status != .partial_content) {
                 self.status = @backingInt(head.status);
                 return error.BadStatus;
             }
+            try body;
             var headers = head.iterateHeaders();
             const range = while (headers.next()) |header| {
                 if (!std.ascii.eqlIgnoreCase(header.name, "content-range")) continue;
                 break http.contentRange(header.value) orelse return error.Malformed;
             } else return error.Malformed;
             const length = head.content_length orelse return error.Malformed;
-            if (range.first != offset or length != dest.len) return error.Malformed;
-
-            // The start of the body is in the buffer of the head. The other
-            // bytes go from the connection to `dest` with no copy between.
-            const body = in.interface.buffered();
-            if (body.len > dest.len) return error.Malformed;
-            @memcpy(dest[0..body.len], body);
-            var got = body.len;
-            while (got < dest.len) got += try self.conn.recv(dest[got..], reply_ms);
+            if (range.first != offset or length != dest.len or start.len > dest.len) return error.Malformed;
             return range;
         }
 
@@ -114,7 +121,7 @@ pub fn Fetcher(comptime Conn: type) type {
             fn stream(reader: *std.Io.Reader, writer: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
                 const input: *Input = @alignCast(@fieldParentPtr("interface", reader));
                 const dest = limit.slice(try writer.writableSliceGreedy(1));
-                const count = input.conn.recv(dest, reply_ms) catch |err| {
+                const count = input.conn.recvSome(dest, reply_ms) catch |err| {
                     input.err = err;
                     return error.ReadFailed;
                 };

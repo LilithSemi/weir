@@ -73,9 +73,21 @@ pub fn Client(comptime Port: type) type {
             if (try self.waitFor(&.{ "SEND OK", "SEND FAIL", "ERROR", "CLOSED" }, send_ms) != 0) return error.Rejected;
         }
 
-        /// Reads data from the connection into `dest`. It gives the number of
-        /// bytes, 1 or more. It waits `ms` milliseconds for each byte.
+        /// Reads data from the connection into `dest`, to the end of `dest` or
+        /// of the current block. It gives the number of bytes, 1 or more. It
+        /// waits `ms` milliseconds for each byte.
         pub fn recv(self: *Self, dest: []u8, ms: u32) Error!usize {
+            return self.fill(dest, ms, .whole);
+        }
+
+        /// Reads the data that is in the UART now, and waits only for the
+        /// first byte. The caller can work between two short reads, while
+        /// the UART holds the bytes that arrive.
+        pub fn recvSome(self: *Self, dest: []u8, ms: u32) Error!usize {
+            return self.fill(dest, ms, .some);
+        }
+
+        fn fill(self: *Self, dest: []u8, ms: u32, amount: enum { whole, some }) Error!usize {
             if (self.pending == 0) try self.blockHeader(ms);
             const want = @min(dest.len, self.pending);
             var got: usize = 0;
@@ -90,6 +102,7 @@ pub fn Client(comptime Port: type) type {
                     idle = 0;
                     continue;
                 }
+                if (got != 0 and amount == .some) break;
                 idle += 1;
                 if (idle % polls_per_clock_read != 0) continue;
                 const time = self.port.now();
