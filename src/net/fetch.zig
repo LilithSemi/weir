@@ -27,6 +27,8 @@ pub fn Fetcher(comptime Conn: type) type {
         status: u16 = 0,
         /// The bytes of the last piece that arrived.
         arrived: usize = 0,
+        /// Called for each piece that Weir asks for again.
+        report: ?*const fn (offset: u64, arrived: usize, err: anyerror) void = null,
 
         const Self = @This();
 
@@ -56,11 +58,13 @@ pub fn Fetcher(comptime Conn: type) type {
                     // A server that gives another status gives it each time.
                     if (err == error.BadStatus or tries == piece_tries) return err;
                     self.retries += 1;
+                    if (self.report) |report| report(offset, self.arrived, err);
                 }
             }
         }
 
         fn attempt(self: *Self, offset: u64, dest: []u8) !http.Range {
+            self.arrived = 0;
             if (!self.open) {
                 try self.conn.connect(self.url.host, self.url.port, connect_ms);
                 self.open = true;

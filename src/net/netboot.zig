@@ -173,6 +173,10 @@ pub fn load() ?block.Device {
     return disk.block();
 }
 
+fn reportRetry(offset: u64, arrived: usize, err: anyerror) void {
+    console.out.print("[net] piece at {d} again: {s} after {d} bytes\n", .{ offset, @errorName(err), arrived }) catch {};
+}
+
 fn readImage(port: *Port, client: *Client, url: http.Url) !void {
     const modem = soc.esp_at.?;
     console.out.print("[net] netboot from {s}:{d}{s}\n", .{ url.host, url.port, url.path }) catch {};
@@ -199,7 +203,7 @@ fn readImage(port: *Port, client: *Client, url: http.Url) !void {
             pause(1000);
         }
     }
-    var fetcher: fetch.Fetcher(Client) = .{ .conn = client, .url = url, .open = true };
+    var fetcher: fetch.Fetcher(Client) = .{ .conn = client, .url = url, .open = true, .report = reportRetry };
     defer fetcher.drop();
     errdefer console.err.print("[net] the last piece stopped after {d} bytes\n", .{fetcher.arrived}) catch {};
     errdefer if (fetcher.status != 0)

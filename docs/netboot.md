@@ -86,6 +86,7 @@ with the next boot source.
 
 The UART has no flow control. Weir reads the overrun bit of the UART with each
 byte and counts the bytes of each piece. When a piece is not complete, Weir
-closes the connection and asks for the piece again, 6 times at most. The line
-`[net] N pieces came again` shows the number. A high number means that the
-baud rate is too high.
+closes the connection and asks for the piece again, 6 times at most. A line
+`[net] piece at N again` shows the cause each time, and the line
+`[net] N pieces came again` shows the number at the end. A high number of
+`Overrun` causes means that the baud rate is too high.
