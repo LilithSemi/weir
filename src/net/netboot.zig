@@ -5,7 +5,6 @@
 const std = @import("std");
 const conduit = @import("conduit");
 const soc = @import("soc");
-const config = @import("../config.zig");
 const console = @import("../console/console.zig");
 const clint = @import("../arch/riscv/clint.zig");
 const mem = @import("../mem.zig");
@@ -14,19 +13,25 @@ const ramdisk = @import("../block/ramdisk.zig");
 const esp_at = @import("esp_at.zig");
 const fetch = @import("fetch.zig");
 const http = @import("http.zig");
+const line_input = @import("line.zig");
+const var_store = @import("../var/store.zig");
+const efi = @import("../var/efi.zig");
 
-/// True when the device tree has the module and the build has a URL.
-pub const enabled = soc.esp_at != null and config.netboot_url.len != 0;
+/// True when the device tree has the module.
+pub const enabled = soc.esp_at != null;
 
 pub const Region = struct { base: usize, len: usize };
 
-const reset_baud = 115200;
 const reset_low_ms = 350;
 const ready_ms = 5000;
 const network_ms = 30_000;
 const piece = 64 * 1024;
 const image_align = 2 << 20;
 const mib = 1 << 20;
+const url_max = 200;
+const prompt_ms = 5000;
+const typing_ms = 60_000;
+const url_name = std.unicode.utf8ToUtf16LeStringLiteral("NetbootUrl");
 
 var disk: ramdisk.RamDisk = undefined; // zippy:ignore unsafe_undefined
 var loaded: ?Region = null;
@@ -140,8 +145,15 @@ fn drive(pin: soc.Pin, active: bool) void {
 /// Reads the image and gives the block device of it. Null when a step fails.
 /// The module is in reset again when this returns.
 pub fn load() ?block.Device {
-    const url = comptime http.Url.parse(config.netboot_url) orelse
-        @compileError("the netboot URL must have the form http://host[:port]/path");
+    var url_buf: [url_max]u8 = undefined;
+    const url_text = askUrl(&url_buf) orelse {
+        console.out.writeAll("[net] no netboot URL\n") catch {};
+        return null;
+    };
+    const url = http.Url.parse(url_text) orelse {
+        console.err.writeAll("[net] the netboot URL must have the form http://host[:port]/path\n") catch {};
+        return null;
+    };
     const modem = soc.esp_at.?;
     defer drive(modem.enable, false);
 
@@ -158,21 +170,21 @@ pub fn load() ?block.Device {
     return disk.block();
 }
 
-fn readImage(port: *Port, client: *Client, comptime url: http.Url) !void {
+fn readImage(port: *Port, client: *Client, url: http.Url) !void {
     const modem = soc.esp_at.?;
-    console.out.print("[net] netboot from {s}\n", .{config.netboot_url}) catch {};
+    console.out.print("[net] netboot from {s}:{d}{s}\n", .{ url.host, url.port, url.path }) catch {};
 
     // The module answers commands only after a reset.
     if (modem.select) |select| drive(select, true);
     drive(modem.enable, false);
-    if (!port.setBaud(reset_baud)) return error.BaudRate;
+    if (!port.setBaud(modem.baud)) return error.BaudRate;
     pause(reset_low_ms);
     drive(modem.enable, true);
     try client.waitReady(ready_ms);
     try client.setup();
-    if (config.netboot_baud != reset_baud) {
-        try client.setBaud(config.netboot_baud);
-        console.out.print("[net] modem at {d} baud\n", .{config.netboot_baud}) catch {};
+    if (modem.max_baud != modem.baud) {
+        try client.setBaud(modem.max_baud);
+        console.out.print("[net] modem at {d} baud\n", .{modem.max_baud}) catch {};
     }
 
     // The module joins the network that it has in its flash. A connect fails
@@ -221,4 +233,59 @@ fn place(size: u64) ?[]u8 {
     const base = std.mem.alignBackward(usize, end - len, image_align);
     if (base < floor) return null;
     return @as([*]u8, @ptrFromInt(base))[0..len];
+}
+
+/// The URL of the image. A person can type it on the console. Without input,
+/// it is the URL of the `NetbootUrl` variable. A new URL goes to that variable.
+/// The variable is not encrypted, and a URL has no secret in it.
+fn askUrl(buf: []u8) ?[]const u8 {
+    var stored_buf: [url_max]u8 = undefined;
+    const stored = storedUrl(&stored_buf);
+
+    // Drop the bytes that came before the prompt.
+    for (0..16) |_| if (console.readByte() == null) break;
+    if (stored) |text| {
+        console.out.print("[net] netboot URL [{s}]: ", .{text}) catch {};
+    } else {
+        console.out.writeAll("[net] netboot URL: ") catch {};
+    }
+
+    var line: line_input.Line = .{ .buf = buf };
+    var end = ms() + prompt_ms;
+    while (true) {
+        const byte = console.readByte() orelse {
+            if (ms() < end) continue;
+            // A line that is not complete is not a URL.
+            line.len = 0;
+            break;
+        };
+        end = ms() + typing_ms;
+        switch (line.feed(byte)) {
+            .echo => |text| console.writeRaw(text),
+            .done => break,
+        }
+    }
+    console.out.writeAll("\n") catch {};
+
+    const typed = line.text();
+    if (typed.len == 0) {
+        const text = stored orelse return null;
+        @memcpy(buf[0..text.len], text);
+        return buf[0..text.len];
+    }
+    // Only a URL that Weir can use goes to the variable.
+    if (http.Url.parse(typed) == null) return typed;
+    if (stored == null or !std.mem.eql(u8, stored.?, typed)) {
+        const attributes = efi.non_volatile | efi.boot_service_access | efi.runtime_access;
+        const saved = var_store.set(url_name, &var_store.weir_guid, attributes, typed.len, typed.ptr) == .success;
+        console.out.writeAll(if (saved) "[net] URL saved\n" else "[net] URL not saved, the board has no variable store\n") catch {};
+    }
+    return typed;
+}
+
+fn storedUrl(buf: []u8) ?[]const u8 {
+    var size: usize = buf.len;
+    if (var_store.get(url_name, &var_store.weir_guid, null, &size, buf.ptr) != .success) return null;
+    if (size == 0) return null;
+    return buf[0..size];
 }

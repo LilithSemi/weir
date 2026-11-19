@@ -339,6 +339,10 @@ pub const EspAt = struct {
     uart_clock: u32,
     reg_shift: u6,
     io_width: u8,
+    /// The baud rate of the module after a reset, from `current-speed`.
+    baud: u32,
+    /// The baud rate for the data, from `max-speed`.
+    max_baud: u32,
     /// The pin that lets the module run. The module is in reset without it.
     enable: Pin,
     /// The pin that connects the module to the UART, on a board that has one.
@@ -356,6 +360,7 @@ pub const esp_at: ?EspAt = if (has_dt) blk: {
     const uart = dt_reg.parentOf(dtb, esp_at_id) orelse
         @compileError("the parent of the " ++ esp_at_id ++ " node has no reg");
     if (uart.base == uart_base) @compileError("the " ++ esp_at_id ++ " node is on the console UART");
+    const baud = dt_reg.propU32(dtb, esp_at_id, "current-speed") orelse 115200;
     for (uart_ids) |id| {
         for (0..dt_reg.count(dtb, id)) |i| {
             if (dt_reg.nth(dtb, id, i).?.base != uart.base) continue;
@@ -367,6 +372,8 @@ pub const esp_at: ?EspAt = if (has_dt) blk: {
                     @compileError("the modem UART has no clock-frequency"),
                 .reg_shift = @intCast(dt_reg.nthPropU32(dtb, id, i, "reg-shift") orelse 0),
                 .io_width = @intCast(width),
+                .baud = baud,
+                .max_baud = dt_reg.propU32(dtb, esp_at_id, "max-speed") orelse baud,
                 .enable = pin(esp_at_id, "enable-gpios") orelse
                     @compileError("the " ++ esp_at_id ++ " node has no enable-gpios"),
                 .select = pin(esp_at_id, "select-gpios"),

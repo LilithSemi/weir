@@ -20,7 +20,9 @@ pub const Url = struct {
             url.host = authority[0..colon];
             url.port = std.fmt.parseInt(u16, authority[colon + 1 ..], 10) catch return null;
         }
-        if (url.host.len == 0) return null;
+        // A name and a password in the URL are not accepted. The URL goes to
+        // a variable that is not encrypted.
+        if (url.host.len == 0 or std.mem.indexOfScalar(u8, authority, '@') != null) return null;
         return url;
     }
 };
@@ -106,6 +108,7 @@ test "a text that is not an http url" {
     try testing.expect(Url.parse("http://host") == null);
     try testing.expect(Url.parse("http://:80/x") == null);
     try testing.expect(Url.parse("http://host:port/x") == null);
+    try testing.expect(Url.parse("http://name:word@host/x") == null);
 }
 
 test "the request for a range" {

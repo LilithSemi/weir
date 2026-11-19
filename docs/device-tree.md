@@ -141,8 +141,10 @@ be the first UART node of the tree.
 | --- | --- |
 | `enable-gpios` | The pin that lets the module run. Necessary. |
 | `select-gpios` | The pin that connects the module to the UART. Optional. |
+| `current-speed` | The baud rate of the module after a reset. The default is 115200. |
+| `max-speed` | The baud rate for the data. Weir changes to it after the reset. The default is `current-speed`. |
 
-Each property has a phandle to a `harbor,gpio` node, the pin number and a flags
+Each of the two pin properties has a phandle to a `harbor,gpio` node, the pin number and a flags
 cell. Bit 0 of the flags is set for a pin that is active when low. Only the
 first node is used. See [netboot.md](netboot.md).
 
