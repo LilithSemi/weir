@@ -73,6 +73,20 @@ export fn weirStrapVector() align(4) callconv(.naked) noreturn {
     asm volatile ("tail weirStrapReport");
 }
 
+/// The return address of the payload. A payload that returns from its entry
+/// arrives here in S-mode, and the firmware asks for a shutdown.
+export fn weirPayloadReturn() callconv(.c) noreturn {
+    console.out.writeAll("\n[weir] the payload returned, shutdown\n") catch {};
+    asm volatile ("ecall"
+        :
+        : [type] "{a0}" (@as(usize, 0)),
+          [reason] "{a1}" (@as(usize, 0)),
+          [fid] "{a6}" (@as(usize, 0)),
+          [eid] "{a7}" (@as(usize, 0x53525354)),
+        : .{ .memory = true });
+    cpu.halt();
+}
+
 /// Runtime-probe whether CSR `name` is implemented on this hart.
 ///
 /// A minimal M-mode core, like the creek River core, implements only the
@@ -208,6 +222,7 @@ pub fn enterSupervisor(entry: usize, hartid: usize, dtb: usize) noreturn {
         : [sp] "r" (stack_top),
           [a0] "{a0}" (hartid),
           [a1] "{a1}" (dtb),
+          [ra] "{ra}" (@intFromPtr(&weirPayloadReturn)),
         : .{ .memory = true });
     unreachable;
 }
