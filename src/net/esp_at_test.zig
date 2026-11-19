@@ -110,7 +110,7 @@ const Modem = struct {
         } else if (std.mem.startsWith(u8, text, "AT+CIPSEND=")) {
             if (!self.connected) return self.put("link is not valid\r\n\r\nERROR\r\n");
             self.data_left = std.fmt.parseInt(usize, text["AT+CIPSEND=".len..], 10) catch unreachable;
-            self.put("\r\nOK\r\n> ");
+            self.put("\r\nOK\r\n\r\n>");
         } else if (std.mem.eql(u8, text, "AT+CIPCLOSE")) {
             self.put(if (self.connected) "CLOSED\r\n\r\nOK\r\n" else "\r\nERROR\r\n");
             self.connected = false;
