@@ -28,7 +28,10 @@ pub fn Fetcher(comptime Conn: type) type {
         /// The bytes of the last piece that arrived.
         arrived: usize = 0,
         /// Called for each piece that Weir asks for again.
-        report: ?*const fn (offset: u64, arrived: usize, err: anyerror) void = null,
+        report: ?*const fn (offset: u64, arrived: usize, err: anyerror, sample: []const u8) void = null,
+        /// The start of a reply whose head was not correct.
+        sample: [32]u8 = undefined,
+        sample_len: usize = 0,
 
         const Self = @This();
 
@@ -58,13 +61,14 @@ pub fn Fetcher(comptime Conn: type) type {
                     // A server that gives another status gives it each time.
                     if (err == error.BadStatus or tries == piece_tries) return err;
                     self.retries += 1;
-                    if (self.report) |report| report(offset, self.arrived, err);
+                    if (self.report) |report| report(offset, self.arrived, err, self.sample[0..self.sample_len]);
                 }
             }
         }
 
         fn attempt(self: *Self, offset: u64, dest: []u8) !http.Range {
             self.arrived = 0;
+            self.sample_len = 0;
             if (!self.open) {
                 try self.conn.connect(self.url.host, self.url.port, connect_ms);
                 self.open = true;
@@ -87,7 +91,13 @@ pub fn Fetcher(comptime Conn: type) type {
             };
             const head_bytes = reply.receiveHead() catch |err| switch (err) {
                 error.ReadFailed => return in.err.?,
-                else => return error.Malformed,
+                else => {
+                    const seen = in.interface.buffered();
+                    self.arrived = seen.len;
+                    self.sample_len = @min(seen.len, self.sample.len);
+                    @memcpy(self.sample[0..self.sample_len], seen[0..self.sample_len]);
+                    return err;
+                },
             };
 
             // The body arrives while the head is still in the buffer, and the

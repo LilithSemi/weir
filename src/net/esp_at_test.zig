@@ -31,6 +31,8 @@ const Modem = struct {
     /// The number of the reply that stops in the middle.
     stall_in_reply: ?u32 = null,
     close_after_reply: bool = false,
+    /// The first block of a reply comes before the `SEND OK` line.
+    late_send_ok: bool = false,
     ignore_range: bool = false,
 
     fn init(file: []const u8) !Modem {
@@ -123,7 +125,8 @@ const Modem = struct {
     fn request(self: *Modem) void {
         const text = self.command[0..self.command_len];
         self.command_len = 0;
-        self.print("\r\nRecv {d} bytes\r\n\r\nSEND OK\r\nWIFI GOT IP\r\n", .{text.len});
+        self.print("\r\nRecv {d} bytes\r\n", .{text.len});
+        if (!self.late_send_ok) self.put("\r\nSEND OK\r\nWIFI GOT IP\r\n");
 
         const key = "Range: bytes=";
         const range = text[std.mem.indexOf(u8, text, key).? + key.len ..];
@@ -173,6 +176,7 @@ const Modem = struct {
                 self.tail += 1;
             }
             sent += count;
+            if (self.late_send_ok and sent == count) self.put("\r\nSEND OK\r\n");
         }
     }
 };
@@ -256,6 +260,15 @@ test "a server that closes the connection after each reply" {
     modem.close_after_reply = true;
     _ = try download(&modem);
     try testing.expect(modem.connects >= 4);
+}
+
+test "a reply that starts before the send is confirmed" {
+    const file = try pattern(150 * 1024);
+    defer testing.allocator.free(file);
+    var modem = try Modem.init(file);
+    defer modem.deinit();
+    modem.late_send_ok = true;
+    try testing.expectEqual(@as(u32, 0), try download(&modem));
 }
 
 test "a connect that fails at first" {

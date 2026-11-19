@@ -173,8 +173,9 @@ pub fn load() ?block.Device {
     return disk.block();
 }
 
-fn reportRetry(offset: u64, arrived: usize, err: anyerror) void {
+fn reportRetry(offset: u64, arrived: usize, err: anyerror, sample: []const u8) void {
     console.out.print("[net] piece at {d} again: {s} after {d} bytes\n", .{ offset, @errorName(err), arrived }) catch {};
+    if (sample.len != 0) console.out.print("[net] the reply started with {x}\n", .{sample}) catch {};
 }
 
 fn readImage(port: *Port, client: *Client, url: http.Url) !void {

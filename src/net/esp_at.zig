@@ -70,7 +70,10 @@ pub fn Client(comptime Port: type) type {
             self.port.write(text);
             if (try self.waitFor(&.{ ">", "ERROR", "CLOSED" }, command_ms) != 0) return error.Rejected;
             self.port.write(bytes);
-            if (try self.waitFor(&.{ "SEND OK", "SEND FAIL", "ERROR", "CLOSED" }, send_ms) != 0) return error.Rejected;
+            // A fast server answers before the module prints `SEND OK`. The
+            // data is then ready to read, and that line comes between blocks.
+            const result = try self.waitFor(&.{ "SEND OK", "SEND FAIL", "ERROR", "CLOSED" }, send_ms);
+            if (result != 0 and self.pending == 0) return error.Rejected;
         }
 
         /// Reads data from the connection into `dest`, to the end of `dest` or
@@ -133,12 +136,21 @@ pub fn Client(comptime Port: type) type {
 
         /// Reads lines until one is equal to an entry of `wanted`, and gives
         /// the index of that entry. The entry `>` is the prompt for data,
-        /// which has no line end.
+        /// which has no line end. When a data block starts first, it stops
+        /// there with `pending` set and gives `wanted.len`.
         fn waitFor(self: *Self, wanted: []const []const u8, ms: u32) Error!usize {
             const end = self.port.now() + ms;
             self.line_len = 0;
             while (true) {
                 const byte = try self.readByte(end);
+                if (byte == ':') {
+                    if (blockLength(self.line[0..self.line_len])) |length| {
+                        self.line_len = 0;
+                        self.pending = length;
+                        if (length != 0) return wanted.len;
+                        continue;
+                    }
+                }
                 if (byte == '\n') {
                     const text = std.mem.trim(u8, self.line[0..self.line_len], "\r ");
                     for (wanted, 0..) |entry, i| {
@@ -166,17 +178,23 @@ pub fn Client(comptime Port: type) type {
                 if (byte == '\n') {
                     if (std.mem.eql(u8, std.mem.trim(u8, text, "\r "), "CLOSED")) return error.Closed;
                     self.line_len = 0;
-                } else if (byte == ':' and std.mem.startsWith(u8, text, "+IPD,")) {
-                    // With more than one connection the header has the link
-                    // number first. The length is the last number.
-                    const comma = std.mem.lastIndexOfScalar(u8, text, ',').?;
+                } else if (byte == ':' and blockLength(text) != null) {
                     self.line_len = 0;
-                    self.pending = std.fmt.parseInt(usize, text[comma + 1 ..], 10) catch continue;
+                    self.pending = blockLength(text).?;
                     if (self.pending != 0) return;
                 } else {
                     self.append(byte);
                 }
             }
+        }
+
+        /// The length in a `+IPD,<length>` header, without its `:`.
+        fn blockLength(text: []const u8) ?usize {
+            if (!std.mem.startsWith(u8, text, "+IPD,")) return null;
+            // With more than one connection the header has the link number
+            // first. The length is the last number.
+            const comma = std.mem.lastIndexOfScalar(u8, text, ',').?;
+            return std.fmt.parseInt(usize, text[comma + 1 ..], 10) catch null;
         }
 
         fn append(self: *Self, byte: u8) void {
