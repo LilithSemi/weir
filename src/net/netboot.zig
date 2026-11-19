@@ -25,6 +25,9 @@ pub const Region = struct { base: usize, len: usize };
 const reset_low_ms = 350;
 const ready_ms = 5000;
 const network_ms = 30_000;
+// The module can take 25 seconds to refuse a connection, and it drops each
+// command that comes before that reply.
+const connect_ms = 30_000;
 const piece = 64 * 1024;
 const image_align = 2 << 20;
 const mib = 1 << 20;
@@ -191,9 +194,8 @@ fn readImage(port: *Port, client: *Client, url: http.Url) !void {
     // until it has an address.
     const deadline = ms() + network_ms;
     while (true) {
-        if (client.connect(url.host, url.port, 15_000)) |_| break else |err| {
+        if (client.connect(url.host, url.port, connect_ms)) |_| break else |err| {
             if (ms() >= deadline) return err;
-            client.close();
             pause(1000);
         }
     }

@@ -9,7 +9,7 @@ const std = @import("std");
 const http = @import("http.zig");
 
 const piece_tries = 6;
-const connect_ms = 15_000;
+const connect_ms = 30_000;
 const reply_ms = 10_000;
 
 pub fn Fetcher(comptime Conn: type) type {

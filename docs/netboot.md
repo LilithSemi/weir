@@ -43,8 +43,8 @@ Weir has no WiFi name and no password, and it puts none in an EFI variable.
 The module joins the network that is in its flash. Store it one time with a terminal on the module:
 
 ```
-AT+CWMODE_DEF=1
-AT+CWJAP_DEF="name","password"
+AT+CWMODE=1
+AT+CWJAP="name","password"
 ```
 
 ## The image

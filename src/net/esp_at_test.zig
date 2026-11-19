@@ -99,12 +99,13 @@ const Modem = struct {
             self.connects += 1;
             if (self.refuse_connects != 0) {
                 self.refuse_connects -= 1;
-                self.put("ERROR\r\nCLOSED\r\n");
+                self.put("\r\nERROR\r\n");
             } else if (self.connected) {
                 self.put("ALREADY CONNECTED\r\n\r\nERROR\r\n");
             } else {
                 self.connected = true;
-                self.put("CONNECT\r\n\r\nOK\r\n");
+                // The module prints the state of the network at any moment.
+                self.put("WIFI CONNECTED\r\nCONNECT\r\n\r\nOK\r\n");
             }
         } else if (std.mem.startsWith(u8, text, "AT+CIPSEND=")) {
             if (!self.connected) return self.put("link is not valid\r\n\r\nERROR\r\n");
@@ -122,7 +123,7 @@ const Modem = struct {
     fn request(self: *Modem) void {
         const text = self.command[0..self.command_len];
         self.command_len = 0;
-        self.print("\r\nRecv {d} bytes\r\n\r\nSEND OK\r\n", .{text.len});
+        self.print("\r\nRecv {d} bytes\r\n\r\nSEND OK\r\nWIFI GOT IP\r\n", .{text.len});
 
         const key = "Range: bytes=";
         const range = text[std.mem.indexOf(u8, text, key).? + key.len ..];
