@@ -527,9 +527,17 @@ fn serialUpdate() void {
             .read_trace = traceSdRead,
             .sd_command = sendSdCommand,
             .sd_register = accessSdRegister,
+            .net_open = if (netboot.enabled) netboot.open else null,
+            .net_read = if (netboot.enabled) netboot.read else null,
+            .net_close = if (netboot.enabled) netboot.close else null,
         },
     };
     engine.run();
+    if (netboot.enabled) netboot.close();
+}
+
+comptime {
+    std.debug.assert(netboot.read_max >= update_serial.max_net_blocks * update_serial.block_size);
 }
 
 fn rescanStorage() []const storage.Device {

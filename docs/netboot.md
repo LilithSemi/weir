@@ -90,3 +90,8 @@ closes the connection and asks for the piece again, 6 times at most. A line
 `[net] piece at N again` shows the cause each time, and the line
 `[net] N pieces came again` shows the number at the end. A high number of
 `Overrun` causes means that the baud rate is too high.
+
+## Writes to a block device
+
+The serial update mode can use the same modem to write a file from the server
+to an SD card. See the net commands in [serial-update.md](serial-update.md).

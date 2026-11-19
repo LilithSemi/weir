@@ -15,6 +15,7 @@ pub const max_payload = 4112;
 pub const block_size = 512;
 pub const max_write_blocks = 8;
 pub const max_crc_blocks = 2048;
+pub const max_net_blocks = 128;
 pub const default_baud = 115200;
 pub const gap_ms = 500;
 pub const confirm_ms = 2000;
@@ -29,7 +30,7 @@ const info_entry_len = 14;
 const request_magic = [2]u8{ 'W', 'U' };
 const reply_magic = [2]u8{ 'w', 'u' };
 
-pub const Command = enum(u8) { ping = 0, info = 1, write = 2, crc = 3, baud = 4, boot = 5, rescan = 6, probe = 7, write_trace = 8, read_trace = 9, sd_command = 10, sd_register = 11, _ };
+pub const Command = enum(u8) { ping = 0, info = 1, write = 2, crc = 3, baud = 4, boot = 5, rescan = 6, probe = 7, write_trace = 8, read_trace = 9, sd_command = 10, sd_register = 11, net_open = 12, net_write = 13, net_close = 14, _ };
 
 pub const max_trace_blocks = 8;
 
@@ -59,6 +60,15 @@ pub fn Hooks(comptime Entry: type) type {
         /// `write` is set. It gives null for a host or an offset that does
         /// not exist.
         sd_register: ?*const fn (index: u8, offset: u8, write: bool, value: u32) ?u32 = null,
+        /// Starts the modem and finds the file at `url` on its server. It
+        /// gives the size of the file, or null when a step fails.
+        net_open: ?*const fn (url: []const u8) ?u64 = null,
+        /// Reads `len` bytes of that file from `offset`. The bytes stay
+        /// valid until the next call. It gives null when the download fails
+        /// or no file is open.
+        net_read: ?*const fn (offset: u64, len: usize) ?[]const u8 = null,
+        /// Stops the modem.
+        net_close: ?*const fn () void = null,
     };
 }
 
@@ -69,6 +79,7 @@ pub const Status = enum(u8) {
     bad_argument = 3,
     io_error = 4,
     read_only = 5,
+    net_error = 6,
 };
 
 // Requests, replies and crc reads share this buffer. The write data and the crc
@@ -132,9 +143,52 @@ pub fn Engine(comptime Transport: type, comptime Entry: type) type {
                 .read_trace => self.readTrace(req),
                 .sd_command => self.sdCommand(req),
                 .sd_register => self.sdRegister(req),
+                .net_open => self.netOpen(req),
+                .net_write => self.netWrite(req),
+                .net_close => self.netClose(req),
                 _ => self.reply(.unknown_command, req.seq, 0),
             }
             return false;
+        }
+
+        fn netOpen(self: *Self, req: Request) void {
+            const service = self.hooks.net_open orelse return self.reply(.unknown_command, req.seq, 0);
+            if (req.payload.len == 0) return self.reply(.bad_argument, req.seq, 0);
+            const size = service(req.payload) orelse return self.reply(.net_error, req.seq, 0);
+            std.mem.writeInt(u64, frame[header_len..][0..8], size, .little);
+            self.reply(.ok, req.seq, 8);
+        }
+
+        // The request has the arguments of a write and no data. The data is
+        // the part of the file at the byte offset lba * 512.
+        fn netWrite(self: *Self, req: Request) void {
+            const service = self.hooks.net_read orelse return self.reply(.unknown_command, req.seq, 0);
+            const args = req.payload;
+            if (args.len != write_args_len) return self.reply(.bad_argument, req.seq, 0);
+            const count: u32 = args[9];
+            if (count < 1 or count > max_net_blocks) return self.reply(.bad_argument, req.seq, 0);
+            const dev = self.device(args[0]) orelse return self.reply(.bad_argument, req.seq, 0);
+            const lba = std.mem.readInt(u64, args[1..9], .little);
+            if (!inRange(dev, lba, count)) return self.reply(.bad_argument, req.seq, 0);
+            if (!dev.writable()) return self.reply(.read_only, req.seq, 0);
+            const data = service(lba * block_size, count * block_size) orelse
+                return self.reply(.net_error, req.seq, 0);
+            var done: u32 = 0;
+            while (done < count) {
+                const n: u32 = @min(max_write_blocks, count - done);
+                const blocks = data[done * block_size ..][0 .. n * block_size];
+                if (!dev.writeBlocks(lba + done, n, blocks)) return self.reply(.io_error, req.seq, 0);
+                done += n;
+            }
+            std.mem.writeInt(u32, frame[header_len..][0..4], std.hash.Crc32.hash(data), .little);
+            self.reply(.ok, req.seq, 4);
+        }
+
+        fn netClose(self: *Self, req: Request) void {
+            const service = self.hooks.net_close orelse return self.reply(.unknown_command, req.seq, 0);
+            if (req.payload.len != 0) return self.reply(.bad_argument, req.seq, 0);
+            service();
+            self.reply(.ok, req.seq, 0);
         }
 
         fn rescan(self: *Self, req: Request) void {
@@ -914,6 +968,86 @@ test "rescan takes the new device list, and probe gives the trace of a host" {
     try testing.expectEqualSlices(u8, &.{2}, rig.replies[1].payload);
     try testing.expectEqualSlices(u8, args[write_args_len..], &disks[0].blocks[7]);
     try testing.expectEqualSlices(u8, "trac", rig.replies[4].payload);
+}
+
+const NetRig = struct {
+    var file: [48 * block_size]u8 align(16) = undefined;
+    var open = false;
+    var fail_read = false;
+
+    fn netOpen(url: []const u8) ?u64 {
+        if (!std.mem.eql(u8, url, "http://h/a.img")) return null;
+        open = true;
+        return file.len;
+    }
+
+    fn netRead(offset: u64, len: usize) ?[]const u8 {
+        if (!open or fail_read or offset + len > file.len) return null;
+        return file[@intCast(offset)..][0..len];
+    }
+
+    fn netClose() void {
+        open = false;
+    }
+};
+
+test "a net write puts a part of the file of the server on the device" {
+    var disks: [3]Disk = @splat(.{});
+    var rig = testRig(&disks);
+    for (&NetRig.file, 0..) |*b, i| b.* = @truncate(i * 13 + i / block_size);
+    NetRig.open = false;
+    NetRig.fail_read = false;
+    var script: Script = .{};
+    var bufs: [6][write_args_len]u8 = undefined;
+    const net_open = @backingInt(Command.net_open);
+    const net_write = @backingInt(Command.net_write);
+    script.request(net_write, 1, traceArgs(&bufs[0], 0, 0, 40));
+    script.request(net_open, 2, "http://other/");
+    script.request(net_open, 3, "http://h/a.img");
+    script.request(net_write, 4, traceArgs(&bufs[1], 0, 4, 40));
+    script.request(net_write, 5, traceArgs(&bufs[2], 1, 0, 1));
+    script.request(net_write, 6, traceArgs(&bufs[3], 0, 60, 8));
+    script.request(net_write, 7, traceArgs(&bufs[4], 0, 0, 129));
+    script.request(@backingInt(Command.net_close), 8, &.{});
+    script.request(net_write, 9, traceArgs(&bufs[5], 0, 0, 1));
+    script.boot(10);
+
+    rig.link = .{ .input = script.bytes[0..script.len] };
+    var engine: Engine(FakeLink, TestEntry) = .{
+        .transport = &rig.link,
+        .devices = rig.entries[0..3],
+        .hooks = .{ .net_open = NetRig.netOpen, .net_read = NetRig.netRead, .net_close = NetRig.netClose },
+    };
+    engine.run();
+    try rig.parse();
+
+    const bad = @backingInt(Status.bad_argument);
+    const net = @backingInt(Status.net_error);
+    const read_only = @backingInt(Status.read_only);
+    try rig.expectReplies(&.{
+        .{ net, 1 }, .{ net, 2 }, .{ ok, 3 }, .{ ok, 4 },  .{ read_only, 5 },
+        .{ bad, 6 }, .{ bad, 7 }, .{ ok, 8 }, .{ net, 9 }, .{ ok, 10 },
+    });
+    try testing.expectEqual(@as(u64, NetRig.file.len), std.mem.readInt(u64, rig.replies[2].payload[0..8], .little));
+    const part = NetRig.file[4 * block_size ..][0 .. 40 * block_size];
+    try testing.expectEqual(std.hash.Crc32.hash(part), std.mem.readInt(u32, rig.replies[3].payload[0..4], .little));
+    try testing.expectEqualSlices(u8, part, @as([*]const u8, @ptrCast(&disks[0].blocks[4]))[0..part.len]);
+    try testing.expectEqualSlices(u8, &@as([block_size]u8, @splat(0)), &disks[0].blocks[3]);
+    try testing.expectEqualSlices(u8, &@as([block_size]u8, @splat(0)), &disks[0].blocks[44]);
+}
+
+test "a net command with no modem service is an unknown command" {
+    var disks: [3]Disk = @splat(.{});
+    var rig = testRig(&disks);
+    var script: Script = .{};
+    var buf: [write_args_len]u8 = undefined;
+    script.request(@backingInt(Command.net_open), 1, "http://h/a.img");
+    script.request(@backingInt(Command.net_write), 2, traceArgs(&buf, 0, 0, 1));
+    script.request(@backingInt(Command.net_close), 3, &.{});
+    script.boot(4);
+    try rig.run(&script, 3);
+    const unknown = @backingInt(Status.unknown_command);
+    try rig.expectReplies(&.{ .{ unknown, 1 }, .{ unknown, 2 }, .{ unknown, 3 }, .{ ok, 4 } });
 }
 
 const TraceRig = struct {

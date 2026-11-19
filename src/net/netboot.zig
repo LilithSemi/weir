@@ -178,10 +178,9 @@ fn reportRetry(offset: u64, arrived: usize, err: anyerror, sample: []const u8) v
     if (sample.len != 0) console.out.print("[net] the reply started with {x}\n", .{sample}) catch {};
 }
 
-fn readImage(port: *Port, client: *Client, url: http.Url) !void {
+/// Resets the module and opens a connection to the server of `url`.
+fn connect(port: *Port, client: *Client, url: http.Url) !void {
     const modem = soc.esp_at.?;
-    console.out.print("[net] netboot from {s}:{d}{s}\n", .{ url.host, url.port, url.path }) catch {};
-
     // The module answers commands only after a reset.
     if (modem.select) |select| drive(select, true);
     drive(modem.enable, false);
@@ -190,10 +189,7 @@ fn readImage(port: *Port, client: *Client, url: http.Url) !void {
     drive(modem.enable, true);
     try client.waitReady(ready_ms);
     try client.setup();
-    if (modem.max_baud != modem.baud) {
-        try client.setBaud(modem.max_baud);
-        console.out.print("[net] modem at {d} baud\n", .{modem.max_baud}) catch {};
-    }
+    if (modem.max_baud != modem.baud) try client.setBaud(modem.max_baud);
 
     // The module joins the network that it has in its flash. A connect fails
     // until it has an address.
@@ -204,6 +200,14 @@ fn readImage(port: *Port, client: *Client, url: http.Url) !void {
             pause(1000);
         }
     }
+}
+
+fn readImage(port: *Port, client: *Client, url: http.Url) !void {
+    const modem = soc.esp_at.?;
+    console.out.print("[net] netboot from {s}:{d}{s}\n", .{ url.host, url.port, url.path }) catch {};
+    try connect(port, client, url);
+    if (modem.max_baud != modem.baud)
+        console.out.print("[net] modem at {d} baud\n", .{modem.max_baud}) catch {};
     var fetcher: fetch.Fetcher(Client) = .{ .conn = client, .url = url, .open = true, .report = reportRetry };
     defer fetcher.drop();
     errdefer console.err.print("[net] the last piece stopped after {d} bytes\n", .{fetcher.arrived}) catch {};
@@ -228,6 +232,56 @@ fn readImage(port: *Port, client: *Client, url: http.Url) !void {
     if (fetcher.retries != 0)
         console.out.print("[net] {d} pieces came again\n", .{fetcher.retries}) catch {};
     loaded = .{ .base = @intFromPtr(memory.ptr), .len = memory.len };
+}
+
+/// A file on a server that stays open between calls. The serial update mode
+/// uses it, so these functions print nothing.
+const session = struct {
+    var port: Port = .{};
+    var client: Client = undefined; // zippy:ignore unsafe_undefined
+    var fetcher: fetch.Fetcher(Client) = undefined; // zippy:ignore unsafe_undefined
+    var url_text: [url_max]u8 = undefined; // zippy:ignore unsafe_undefined
+    var buffer: [piece]u8 align(16) = undefined; // zippy:ignore unsafe_undefined
+    var active = false;
+};
+
+/// The largest read from an open file.
+pub const read_max = piece;
+
+/// Starts the module and finds the file at `text`. It gives the size of the
+/// file. Null when the URL is not correct or a step fails.
+pub fn open(text: []const u8) ?u64 {
+    close();
+    if (text.len > url_max) return null;
+    @memcpy(session.url_text[0..text.len], text);
+    const url = http.Url.parse(session.url_text[0..text.len]) orelse return null;
+    session.port = .{};
+    session.client = .{ .port = &session.port };
+    session.fetcher = .{ .conn = &session.client, .url = url, .open = true };
+    session.active = true;
+    connect(&session.port, &session.client, url) catch {
+        close();
+        return null;
+    };
+    return session.fetcher.size() catch {
+        close();
+        return null;
+    };
+}
+
+/// Reads `len` bytes of the open file from `offset`. The bytes stay valid
+/// until the next call. Null when no file is open or the download fails.
+pub fn read(offset: u64, len: usize) ?[]const u8 {
+    if (!session.active or len == 0 or len > read_max) return null;
+    session.fetcher.read(offset, session.buffer[0..len]) catch return null;
+    return session.buffer[0..len];
+}
+
+/// Closes the file and puts the module in reset.
+pub fn close() void {
+    if (session.active) session.fetcher.drop();
+    session.active = false;
+    drive(soc.esp_at.?.enable, false);
 }
 
 /// The memory for an image of `size` bytes, at the top of RAM and above the

@@ -70,6 +70,9 @@ Two rules keep the host and Weir in step after an error:
 | 9 | read trace | SD host u8, lba u64, count u8 (0 to 8) | trace records, see below |
 | 10 | SD command | SD host u8, opcode u8, response type u8 (0 none, 1 short, 2 long, 3 short with busy, 4 short with no CRC and no index), argument u32 | one trace record |
 | 11 | SD register | SD host u8, offset u8, write u8 (0 or 1), value u32 | the register value u32 |
+| 12 | net open | the URL text, `http://host[:port]/path` | file size u64 |
+| 13 | net write | device u8, lba u64, count u8 (1 to 128) | CRC-32 u32 of the data |
+| 14 | net close | none | none |
 
 The info reply has the version u8 (1), the maximum blocks for one write u8 (8)
 and the device count u8. Then for each device it has:
@@ -160,6 +163,30 @@ set when the host drives CMD, bits 11 to 4 are the DAT lines, and bits 23 to
 These two are for tests of the host and the card by hand. They do not go
 through the block driver, so send `rescan` before the next `write` or `crc`.
 
+## Writes from a server
+
+The three net commands need a board with the modem of the netboot, see
+[netboot.md](netboot.md). On other boards they get status 2. With them the
+host sends only a few bytes for each 64 KiB, and the data comes through the
+modem.
+
+`net open` resets the modem, connects to the server of the URL and gives the
+size of the file. The server must support range requests. Weir does not keep
+the URL. The reply can take 70 seconds when the modem has no network.
+
+`net write` reads count blocks of the file through the modem and writes them
+to the device at the lba. The data is the part of the file at the byte offset
+lba * 512, so the file is an image of the whole device. The reply has the
+CRC-32 of the data. Compare it with the CRC of the same part of the file on
+the host, and use `crc` to read the blocks back from the device. A piece that
+arrives with an error is read again up to 6 times, so the reply can take more
+than a minute. A write that Weir does again gives the same result.
+
+`net close` puts the modem in reset. The `boot` command does the same.
+
+Weir prints no text for these commands. A failure gives status 6 with no
+cause.
+
 ## Status codes
 
 | Code | Meaning |
@@ -170,6 +197,7 @@ through the block driver, so send `rescan` before the next `write` or `crc`.
 | 3 | bad argument (device, lba, count, length or baud) |
 | 4 | I/O error from the device |
 | 5 | the device is read only |
+| 6 | the modem or the server did not give the data |
 
 ## Baud rate
 
