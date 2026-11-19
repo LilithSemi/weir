@@ -26,6 +26,7 @@ const soc = @import("soc");
 const update_serial = @import("update/serial.zig");
 const update_uart = @import("update/uart.zig");
 const sd_trace = @import("drivers/sd_trace.zig");
+const netboot = @import("net/netboot.zig");
 
 /// Firmware panic handler. The UART is reachable from both M- and S-mode, so it
 /// reports wherever a panic happens, then parks the hart.
@@ -581,6 +582,13 @@ fn traceSdRead(index: u8, lba: u64, count: u8, out: []u8) ?usize {
 /// an ELF payload. Weir tries the boot sources in priority order. A boot manager
 /// that finds nothing falls back to an embedded payload. If every source fails,
 /// halt. See noBoot.
+/// Reads the netboot disk image and adds it to the block devices. Gives the
+/// index of the new device.
+fn netbootDisk() ?usize {
+    const dev = netboot.load() orelse return null;
+    return storage.addRam(dev, netboot.region().?.base, config.netboot_first);
+}
+
 pub fn handoff(hartid: usize, dtb: usize) Handoff {
     console.out.writeAll("[weir] handoff: entered\n") catch {};
 
@@ -614,7 +622,12 @@ pub fn handoff(hartid: usize, dtb: usize) Handoff {
         // Copy the tree first. The boot manager reads files into RAM where an
         // earlier stage could have left it.
         const dtb_stable = stableDtb(dtb_eff);
-        if (manager.loadBootImage()) |loaded| {
+        if (netboot.enabled and config.netboot_first) _ = netbootDisk();
+        var image = manager.loadBootImage();
+        if (image == null and netboot.enabled and !config.netboot_first) {
+            if (netbootDisk()) |index| image = manager.loadBootImageFrom(index);
+        }
+        if (image) |loaded| {
             const table = uefi.prepare(dtb_stable, hartid, loaded.base, loaded.size);
             console.out.print(
                 "[uefi] PE entry @ {x} (base {x}, {d} bytes), system table @ {x}\n",

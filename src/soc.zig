@@ -313,6 +313,69 @@ pub const restart_vector: ?usize = if (has_dt) blk: {
     break :blk @intCast(r.base);
 } else null;
 
+/// One pin of a Harbor GPIO block, from a `gpios` property.
+pub const Pin = struct {
+    /// The register block of the GPIO.
+    base: usize,
+    pin: u5,
+    active_low: bool,
+};
+
+fn pin(comptime id: []const u8, comptime name: []const u8) ?Pin {
+    const dtb = @embedFile("soc_dtb");
+    const handle = dt_reg.propCell(dtb, id, name, 0) orelse return null;
+    const block = dt_reg.byPhandle(dtb, handle) orelse
+        @compileError("the " ++ name ++ " of the " ++ id ++ " node names no node with a reg");
+    const number = dt_reg.propCell(dtb, id, name, 1) orelse
+        @compileError("the " ++ name ++ " of the " ++ id ++ " node has no pin number");
+    if (number > 31) @compileError("the " ++ name ++ " of the " ++ id ++ " node has a pin number over 31");
+    const flags = dt_reg.propCell(dtb, id, name, 2) orelse 0;
+    return .{ .base = @intCast(block.base), .pin = @intCast(number), .active_low = flags & 1 != 0 };
+}
+
+/// An ESP32 with the AT command firmware on a UART.
+pub const EspAt = struct {
+    uart_base: usize,
+    uart_clock: u32,
+    reg_shift: u6,
+    io_width: u8,
+    /// The pin that lets the module run. The module is in reset without it.
+    enable: Pin,
+    /// The pin that connects the module to the UART, on a board that has one.
+    select: ?Pin,
+};
+
+const esp_at_id = "espressif,esp-at";
+
+/// The module of the `espressif,esp-at` node. The UART is the parent of that
+/// node. Null when the tree has no such node.
+pub const esp_at: ?EspAt = if (has_dt) blk: {
+    @setEvalBranchQuota(16_000_000);
+    const dtb = @embedFile("soc_dtb");
+    if (dt_reg.count(dtb, esp_at_id) == 0) break :blk null;
+    const uart = dt_reg.parentOf(dtb, esp_at_id) orelse
+        @compileError("the parent of the " ++ esp_at_id ++ " node has no reg");
+    if (uart.base == uart_base) @compileError("the " ++ esp_at_id ++ " node is on the console UART");
+    for (uart_ids) |id| {
+        for (0..dt_reg.count(dtb, id)) |i| {
+            if (dt_reg.nth(dtb, id, i).?.base != uart.base) continue;
+            const width = dt_reg.nthPropU32(dtb, id, i, "reg-io-width") orelse 1;
+            if (width != 1 and width != 4) @compileError("the reg-io-width of the modem UART is not 1 or 4");
+            break :blk .{
+                .uart_base = @intCast(uart.base),
+                .uart_clock = dt_reg.nthPropU32(dtb, id, i, "clock-frequency") orelse
+                    @compileError("the modem UART has no clock-frequency"),
+                .reg_shift = @intCast(dt_reg.nthPropU32(dtb, id, i, "reg-shift") orelse 0),
+                .io_width = @intCast(width),
+                .enable = pin(esp_at_id, "enable-gpios") orelse
+                    @compileError("the " ++ esp_at_id ++ " node has no enable-gpios"),
+                .select = pin(esp_at_id, "select-gpios"),
+            };
+        }
+    }
+    @compileError("the parent of the " ++ esp_at_id ++ " node is not a 16550 UART");
+} else null;
+
 pub const Framebuffer = struct { base: usize, size: usize };
 
 /// The memory of a `simple-framebuffer` node. Null when the tree has none.

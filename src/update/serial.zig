@@ -361,6 +361,7 @@ fn kindCode(kind: anytype) u8 {
         .virtio => 0,
         .sdhci => 1,
         .sd_spi => 2,
+        .ram => 3,
     };
 }
 
@@ -482,7 +483,7 @@ const Disk = struct {
     }
 };
 
-const TestKind = enum { virtio, sdhci, sd_spi };
+const TestKind = enum { virtio, sdhci, sd_spi, ram };
 const TestEntry = struct { kind: TestKind, dev: conduit.device.Block };
 
 const Script = struct {

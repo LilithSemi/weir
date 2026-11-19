@@ -36,12 +36,13 @@ var states: [soc.displays.len]State = @splat(.{
 var pool: ?*page_alloc.Pool = null;
 
 /// Gives each display a framebuffer and starts it. Call when the page pool
-/// is new, before the first allocation of a loader.
-pub fn setup(pages: *page_alloc.PageAllocator, memory_pool: *page_alloc.Pool) void {
+/// is new, before the first allocation of a loader. The framebuffers from
+/// the pool go below `pool_top`.
+pub fn setup(pages: *page_alloc.PageAllocator, memory_pool: *page_alloc.Pool, pool_top: usize) void {
     pool = memory_pool;
     // The framebuffers go to the top of the pool, one below the other, so
     // the low memory stays in one piece for the OS image.
-    var top = pages.end;
+    var top = pool_top;
     for (soc.displays, &states) |display, *state| {
         state.surface = null;
         const driver: harbor.Display(harbor.Mmio) = .{ .bus = .{ .base = display.base } };

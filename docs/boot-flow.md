@@ -55,6 +55,9 @@ It then tries the boot sources in priority order:
 1. The boot manager, which finds an ESP, mounts FAT, and honours the boot
    variables, an extlinux file, or the removable-media fallback. See
    [Boot a kernel from an extlinux file](#boot-a-kernel-from-an-extlinux-file).
+   A build with the netboot adds a disk image from a server to the block
+   devices when no other device has a bootable image. See
+   [netboot.md](netboot.md).
 2. An embedded PE application.
 3. An embedded S-mode ELF payload.
 

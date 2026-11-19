@@ -117,6 +117,9 @@ pub fn build(b: *std.Build) void {
     const var_selftest = b.option(bool, "var-selftest", "Test the EFI variable store at each boot") orelse false;
     const rt_selftest = b.option(bool, "rt-selftest", "Run the runtime variable self-test: it writes and keeps two variables in the store and ends the boot when a store exists") orelse false;
     const serial_update = b.option(bool, "serial-update", "Offer a serial update mode before the boot manager, to write block devices over the UART") orelse false;
+    const netboot_url = b.option([]const u8, "netboot-url", "Disk image for the netboot, as http://host[:port]/path. Used only when the device tree has an espressif,esp-at node") orelse "";
+    const netboot_baud = b.option(u32, "netboot-baud", "Baud rate to the modem while the netboot reads the image") orelse 115200;
+    const netboot_first = b.option(bool, "netboot-first", "Try the netboot before the block devices of the board") orelse false;
 
     // An initramfs to hand the Linux kernel via the LoadFile2 protocol, so it
     // reaches a real userspace instead of panicking for lack of a root fs.
@@ -141,6 +144,9 @@ pub fn build(b: *std.Build) void {
     options.addOption(bool, "var_selftest", var_selftest);
     options.addOption(bool, "rt_selftest", rt_selftest);
     options.addOption(bool, "serial_update", serial_update);
+    options.addOption([]const u8, "netboot_url", netboot_url);
+    options.addOption(u32, "netboot_baud", netboot_baud);
+    options.addOption(bool, "netboot_first", netboot_first);
 
     const mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -247,6 +253,7 @@ pub fn build(b: *std.Build) void {
         "src/flash/cfi.zig",
         "src/flash/spi_nor.zig",
         "src/layout.zig",
+        "src/net/esp_at_test.zig",
         "src/smbios/structs.zig",
         "src/smbios/table.zig",
         "src/uefi/framebuffer_place.zig",
@@ -291,6 +298,13 @@ pub fn build(b: *std.Build) void {
     });
     update_test_mod.addImport("conduit", conduit_host);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = update_test_mod })).step);
+    const ramdisk_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/block/ramdisk.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    ramdisk_test_mod.addImport("conduit", conduit_host);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = ramdisk_test_mod })).step);
     const sd_trace_test_mod = b.createModule(.{
         .root_source_file = b.path("src/drivers/sd_trace.zig"),
         .target = b.graph.host,

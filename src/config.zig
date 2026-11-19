@@ -35,3 +35,11 @@ pub const bios_date: []const u8 = options.bios_date;
 
 /// When true, Weir offers the serial update mode before the boot manager.
 pub const serial_update: bool = options.serial_update;
+
+/// The disk image that the netboot reads, as `http://host[:port]/path`. Empty
+/// when the build has no netboot.
+pub const netboot_url: []const u8 = options.netboot_url;
+/// The baud rate to the modem while the netboot reads the image.
+pub const netboot_baud: u32 = options.netboot_baud;
+/// When true, the netboot comes before the block devices of the board.
+pub const netboot_first: bool = options.netboot_first;

@@ -15,5 +15,6 @@
 - [testing.md](testing.md) - how to test on QEMU and on hardware.
 - [debugging.md](debugging.md) - reading traps, the console, and OpenOCD.
 - [serial-update.md](serial-update.md) - writing the boot storage over the UART.
+- [netboot.md](netboot.md) - booting a disk image from an HTTP server.
 - [devices.md](devices.md) - the devices Weir runs on, and their status.
 - [glossary.md](glossary.md) - short definitions of the terms used in these docs.

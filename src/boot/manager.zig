@@ -62,6 +62,11 @@ var dev: block.Device = undefined; // zippy:ignore unsafe_undefined
 /// Walk every block device in boot order and load the first bootable image.
 /// Returns null when no device holds one.
 pub fn loadBootImage() ?pe.Loaded {
+    return loadBootImageFrom(0);
+}
+
+/// The same, without the devices before the index `first`.
+pub fn loadBootImageFrom(first: usize) ?pe.Loaded {
     const buf = staging(mem.kernel_read_base, mem.kernel_read_size);
     if (!storage.init()) {
         console.out.writeAll("[boot] no block device found\n") catch {};
@@ -69,6 +74,7 @@ pub fn loadBootImage() ?pe.Loaded {
     }
 
     for (storage.devices(), 0..) |sd, i| {
+        if (i < first) continue;
         if (tryDevice(sd, i, buf)) |loaded| return loaded;
         console.out.print(
             "[boot] device {d} has no bootable image, trying the next\n",

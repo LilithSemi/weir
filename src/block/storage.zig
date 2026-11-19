@@ -3,6 +3,7 @@
 //! each SPI master the device tree declares. The boot manager walks the list and
 //! boots the first device that holds a bootable ESP.
 
+const std = @import("std");
 const soc = @import("soc");
 const block = @import("block.zig");
 const virtio = @import("../virtio/blk.zig");
@@ -10,7 +11,7 @@ const sdhci = @import("../drivers/sdhci.zig");
 const sd_spi = @import("../drivers/sd_spi.zig");
 const platform = @import("../platform.zig");
 
-pub const Kind = enum { virtio, sdhci, sd_spi };
+pub const Kind = enum { virtio, sdhci, sd_spi, ram };
 
 /// Human-facing identity for a device, the usual metadata a disk carries. SD and
 /// MMC cards fill it from their CID register. A transport with no such register,
@@ -97,10 +98,11 @@ fn infoFromCid(cid: sd_spi.Cid) Info {
 var spi_cards_arr: [soc.spi_count]sd_spi.SdSpi = undefined;
 const spi_cards: []sd_spi.SdSpi = &spi_cards_arr;
 // virtio transports + one per native SD/MMC host + one card per SPI master, all
-// from the device tree. A build with no device tree declares no block device;
-// the min of 1 keeps append() compilable (an index into a zero-length array is a
-// compile error), and count_v stays 0 so devices() is still empty.
-var entries: [@max(1, soc.virtio_count + soc.sdhci_count + soc.spi_count)]Device = undefined;
+// from the device tree, and one more for a disk image in RAM.
+var entries: [soc.virtio_count + soc.sdhci_count + soc.spi_count + 1]Device = undefined;
+// A disk image in RAM, which a new discovery must keep.
+var ram: ?Device = null;
+var ram_first = false;
 var count_v: usize = 0;
 var inited = false;
 
@@ -122,6 +124,7 @@ pub fn init() bool {
     if (inited) return count_v > 0;
     inited = true;
     count_v = 0;
+    if (ram_first) if (ram) |disk| append(.ram, disk.dev, disk.base, .{});
 
     // virtio-blk has no CID-style identity register, so it reports no metadata.
     if (virtio.init()) append(.virtio, virtio.device(), virtio.mmioBase(), .{});
@@ -145,7 +148,27 @@ pub fn init() bool {
         }
     }
 
+    if (!ram_first) if (ram) |disk| append(.ram, disk.dev, disk.base, .{});
     return count_v > 0;
+}
+
+/// Adds a disk image in RAM at `base` to the list, as the first or the last
+/// device. Gives its index.
+pub fn addRam(dev: block.Device, base: u64, first: bool) usize {
+    ram = .{ .kind = .ram, .dev = dev, .base = base };
+    ram_first = first;
+    // A new discovery sends commands to each card again, so only the first
+    // call for the list does one.
+    if (!inited) {
+        _ = init();
+    } else if (first) {
+        std.mem.copyBackwards(Device, entries[1 .. count_v + 1], entries[0..count_v]);
+        entries[0] = ram.?;
+        count_v += 1;
+    } else {
+        append(.ram, dev, base, .{});
+    }
+    return if (first) 0 else count_v - 1;
 }
 
 /// Every discovered block device, in boot order. Call init() first. The boot

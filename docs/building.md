@@ -38,6 +38,9 @@ zig build -Ddtb=board.dtb
 | `-Dvar-selftest` | Test the EFI variable store at each boot. See [testing.md](testing.md). |
 | `-Drt-selftest` | Test the variable services after `ExitBootServices`, then stop. See [testing.md](testing.md). |
 | `-Dserial-update` | Offer the serial update mode before the boot manager. See [serial-update.md](serial-update.md). |
+| `-Dnetboot-url=URL` | The disk image for the netboot. Used only with a modem node in the device tree. See [netboot.md](netboot.md). |
+| `-Dnetboot-baud=RATE` | The baud rate to the modem for the netboot. |
+| `-Dnetboot-first` | Do the netboot before the block devices. |
 | `-Dinitrd=PATH` | An initramfs to serve the kernel through LoadFile2. |
 | `-Dboard-info=PATH` | Board identity (zon) for the SMBIOS tables. See [smbios.md](smbios.md). |
 | `-Dbios-date=DATE` | SMBIOS BIOS release date, as MM/DD/YYYY. |

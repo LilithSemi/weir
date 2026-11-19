@@ -130,6 +130,22 @@ A tree without these nodes is correct for a board with no such device. Then
 Weir uses the first `reg` address of the `harbor,maskrom` node as the address
 where a hart starts after a reset. See [sbi.md](sbi.md#system-reset).
 
+## Netboot modem
+
+A node with the compatible `espressif,esp-at` is an ESP32 with the AT command
+firmware. Its parent is the 16550 UART of the module, with `clock-frequency`,
+`reg-shift` and `reg-io-width` as the console UART has. The console UART must
+be the first UART node of the tree.
+
+| Property | Meaning |
+| --- | --- |
+| `enable-gpios` | The pin that lets the module run. Necessary. |
+| `select-gpios` | The pin that connects the module to the UART. Optional. |
+
+Each property has a phandle to a `harbor,gpio` node, the pin number and a flags
+cell. Bit 0 of the flags is set for a pin that is active when low. Only the
+first node is used. See [netboot.md](netboot.md).
+
 ## Displays
 
 Weir uses each node with the compatible `harbor,display`, in the order of the

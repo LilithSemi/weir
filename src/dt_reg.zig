@@ -169,6 +169,15 @@ pub fn nthPropU32(dtb: []const u8, compatible: []const u8, index: usize, name: [
     return std.mem.readInt(u32, value[0..cell_bytes], .big);
 }
 
+/// Cell number `index` of a property of the first node with this compatible.
+pub fn propCell(dtb: []const u8, compatible: []const u8, name: []const u8, index: usize) ?u32 {
+    const node = find(dtb, .{ .compatible = .{ .id = compatible, .index = 0 } }, name) orelse return null;
+    const value = node.prop orelse return null;
+    const start = index * cell_bytes;
+    if (value.len < start + cell_bytes) return null;
+    return std.mem.readInt(u32, value[start..][0..cell_bytes], .big);
+}
+
 /// A property with one address and size pair, in the cells of the parent, of
 /// node number `index` of the nodes with this compatible.
 pub fn nthPropRegion(dtb: []const u8, compatible: []const u8, index: usize, name: []const u8) ?Region {
@@ -237,6 +246,15 @@ test "a one cell property" {
     try testing.expectEqual(@as(?u32, null), propU32(dtb, "ns16550a", "reg-io-width"));
     try testing.expectEqual(@as(?u32, null), propU32(dtb, "harbor,unit-id", "reg-shift"));
     try testing.expectEqual(@as(?u32, null), propU32(dtb, "ns16550a", "compatible"));
+}
+
+test "one cell of a property" {
+    const dtb = try displayTree(testing.allocator);
+    defer testing.allocator.free(dtb);
+    try testing.expectEqual(@as(?u32, 0x80000000), propCell(dtb, "harbor,display", "harbor,scanout-memory", 0));
+    try testing.expectEqual(@as(?u32, 0x2000000), propCell(dtb, "harbor,display", "harbor,scanout-memory", 1));
+    try testing.expectEqual(@as(?u32, null), propCell(dtb, "harbor,display", "harbor,scanout-memory", 2));
+    try testing.expectEqual(@as(?u32, null), propCell(dtb, "harbor,display", "none", 0));
 }
 
 test "the parent of a node" {

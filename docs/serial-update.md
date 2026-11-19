@@ -76,7 +76,7 @@ and the device count u8. Then for each device it has:
 
 | Field | Size | Notes |
 | --- | --- | --- |
-| kind | 1 | 0 virtio, 1 SD host (sdhci), 2 SD card on SPI |
+| kind | 1 | 0 virtio, 1 SD host (sdhci), 2 SD card on SPI, 3 disk image in RAM |
 | writable | 1 | 1 when the device accepts writes |
 | block size | 4 | bytes |
 | block count | 8 | |
