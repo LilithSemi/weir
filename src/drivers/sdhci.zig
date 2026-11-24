@@ -7,6 +7,7 @@
 const conduit = @import("conduit");
 const soc = @import("soc");
 const block = @import("../block/block.zig");
+const clint = @import("../arch/riscv/clint.zig");
 
 // One driver instance per native SD/MMC host. init() binds a slot before any
 // accessor reads it. bind() builds the full driver state, so zero-init would
@@ -21,8 +22,14 @@ pub fn init(idx: usize, base: usize, freq: u32, bus_width: u32) bool {
     devs[idx] = conduit.driver.harbor_sdio.bind(conduit.Mmio.direct(base), .{
         .freq = freq,
         .bus_width = if (bus_width == 1) .one else .four,
+        .now_us = nowUs,
     });
     return devs[idx].cardPresent();
+}
+
+fn nowUs() u64 {
+    const ticks_per_us = comptime @max(1, soc.timebase_hz / 1_000_000);
+    return clint.time() / ticks_per_us;
 }
 
 /// Present host `idx`'s card as a generic block device for the partition/FS layers.
@@ -47,4 +54,12 @@ pub fn cardAddress(idx: usize) ?CardAddress {
     if (soc.sdhci_count == 0) return null;
     if (!devs[idx].cardPresent()) return null;
     return .{ .rca = devs[idx].rca, .high_capacity = devs[idx].high_capacity };
+}
+
+/// The interrupt status and the card status of the last failed write on host
+/// `idx`. The card status is 0xffffffff when the card did not answer.
+pub fn fault(idx: usize) [2]u32 {
+    if (soc.sdhci_count == 0) unreachable;
+    const f = devs[idx].fault;
+    return .{ f.int_status, f.card_status orelse 0xffff_ffff };
 }

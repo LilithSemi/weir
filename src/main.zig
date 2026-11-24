@@ -26,6 +26,7 @@ const soc = @import("soc");
 const update_serial = @import("update/serial.zig");
 const update_uart = @import("update/uart.zig");
 const sd_trace = @import("drivers/sd_trace.zig");
+const sdhci = @import("drivers/sdhci.zig");
 const netboot = @import("net/netboot.zig");
 
 /// Firmware panic handler. The UART is reachable from both M- and S-mode, so it
@@ -530,6 +531,7 @@ fn serialUpdate() void {
             .net_open = if (netboot.enabled) netboot.open else null,
             .net_read = if (netboot.enabled) netboot.read else null,
             .net_close = if (netboot.enabled) netboot.close else null,
+            .write_fault = sdWriteFault,
         },
     };
     engine.run();
@@ -538,6 +540,14 @@ fn serialUpdate() void {
 
 comptime {
     std.debug.assert(netboot.read_max >= update_serial.max_net_blocks * update_serial.block_size);
+}
+
+fn sdWriteFault(entry: *const storage.Device) ?[2]u32 {
+    if (entry.kind != .sdhci) return null;
+    for (platform.sdhciControllers(), 0..) |host, idx| {
+        if (host.base == entry.base) return sdhci.fault(idx);
+    }
+    return null;
 }
 
 fn rescanStorage() []const storage.Device {
