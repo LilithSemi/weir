@@ -60,6 +60,10 @@ pub fn Hooks(comptime Entry: type) type {
         /// `write` is set. It gives null for a host or an offset that does
         /// not exist.
         sd_register: ?*const fn (index: u8, offset: u8, write: bool, value: u32) ?u32 = null,
+        /// The cause of the last failed write to `entry`, as the interrupt
+        /// status of the host and the card status. Null when the device keeps
+        /// no cause.
+        write_fault: ?*const fn (entry: *const Entry) ?[2]u32 = null,
         /// Starts the modem and finds the file at `url` on its server. It
         /// gives the size of the file, or null when a step fails.
         net_open: ?*const fn (url: []const u8) ?u64 = null,
@@ -126,7 +130,10 @@ pub fn Engine(comptime Transport: type, comptime Entry: type) type {
             switch (@as(Command, @fromBackingInt(@intCast(req.code)))) {
                 .ping => self.reply(emptyStatus(req), req.seq, 0),
                 .info => self.info(req),
-                .write => self.reply(self.write(req.payload), req.seq, 0),
+                .write => {
+                    const status = self.write(req.payload);
+                    if (status == .io_error) self.writeError(req) else self.reply(status, req.seq, 0);
+                },
                 .crc => self.crc(req),
                 .baud => self.baud(req),
                 .boot => {
@@ -177,11 +184,22 @@ pub fn Engine(comptime Transport: type, comptime Entry: type) type {
             while (done < count) {
                 const n: u32 = @min(max_write_blocks, count - done);
                 const blocks = data[done * block_size ..][0 .. n * block_size];
-                if (!dev.writeBlocks(lba + done, n, blocks)) return self.reply(.io_error, req.seq, 0);
+                if (!dev.writeBlocks(lba + done, n, blocks)) return self.writeError(req);
                 done += n;
             }
             std.mem.writeInt(u32, frame[header_len..][0..4], std.hash.Crc32.hash(data), .little);
             self.reply(.ok, req.seq, 4);
+        }
+
+        // The io_error reply to a write. It has the cause when the device
+        // keeps one: the interrupt status u32 and the card status u32.
+        fn writeError(self: *Self, req: Request) void {
+            const service = self.hooks.write_fault orelse return self.reply(.io_error, req.seq, 0);
+            // The write checked the device index before it wrote.
+            const cause = service(&self.devices[req.payload[0]]) orelse return self.reply(.io_error, req.seq, 0);
+            std.mem.writeInt(u32, frame[header_len..][0..4], cause[0], .little);
+            std.mem.writeInt(u32, frame[header_len + 4 ..][0..4], cause[1], .little);
+            self.reply(.io_error, req.seq, 8);
         }
 
         fn netClose(self: *Self, req: Request) void {
@@ -740,6 +758,39 @@ test "a device that fails the write or read gets an io error" {
     try rig.run(&script, 3);
     const io = @backingInt(Status.io_error);
     try rig.expectReplies(&.{ .{ io, 1 }, .{ io, 2 }, .{ ok, 3 } });
+}
+
+const FaultRig = struct {
+    fn fault(entry: *const TestEntry) ?[2]u32 {
+        if (entry.kind != .sdhci) return null;
+        return .{ 0x22, 0xc00 };
+    }
+};
+
+test "a failed write has the cause of the device in its reply" {
+    var disks: [3]Disk = @splat(.{});
+    var rig = testRig(&disks);
+    disks[0].fail = true;
+    disks[2].fail = true;
+    var script: Script = .{};
+    var bufs: [2][max_payload]u8 = undefined;
+    script.request(cmd_write, 1, writeArgs(&bufs[0], 0, 0, 1, 0));
+    script.request(cmd_write, 2, writeArgs(&bufs[1], 2, 0, 1, 0));
+    script.boot(3);
+
+    rig.link = .{ .input = script.bytes[0..script.len] };
+    var engine: Engine(FakeLink, TestEntry) = .{
+        .transport = &rig.link,
+        .devices = rig.entries[0..3],
+        .hooks = .{ .write_fault = FaultRig.fault },
+    };
+    engine.run();
+    try rig.parse();
+
+    const io = @backingInt(Status.io_error);
+    try rig.expectReplies(&.{ .{ io, 1 }, .{ io, 2 }, .{ ok, 3 } });
+    try testing.expectEqualSlices(u8, &.{ 0x22, 0, 0, 0, 0x00, 0x0c, 0, 0 }, rig.replies[0].payload);
+    try testing.expectEqual(0, rig.replies[1].payload.len);
 }
 
 test "crc gives the CRC-32 of the blocks across several chunks and checks its arguments" {

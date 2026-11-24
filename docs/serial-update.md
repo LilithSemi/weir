@@ -199,6 +199,11 @@ cause.
 | 5 | the device is read only |
 | 6 | the modem or the server did not give the data |
 
+The status 4 reply to `write` and `net write` can have a payload of 8 bytes: the
+interrupt status u32 of the SD host and the card status u32 (R1) after the
+failure. A card status of 0xffffffff means that the card did not answer. With
+no payload, the device keeps no cause.
+
 ## Baud rate
 
 Weir sends the reply to `baud` at the old rate and waits until the transmitter
