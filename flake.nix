@@ -16,6 +16,14 @@
       ...
     }@inputs:
     let
+      inherit (nixpkgs) lib;
+
+      manifestVersion =
+        let
+          matched = builtins.match ".*\n[ ]*\\.version = \"([^\"]+)\",.*" (builtins.readFile ./build.zig.zon);
+        in
+        if matched == null then throw "build.zig.zon has no .version to read" else builtins.head matched;
+
       flakeverConfig = flakever.lib.mkFlakever {
         inherit inputs;
 
@@ -32,7 +40,13 @@
         inputs.treefmt-nix.flakeModule
       ];
 
-      flake.versionTemplate = "1.1pre-<lastModifiedDate>-<rev>";
+      # Only `-unstable` is stamped. A release candidate is named by a person
+      # and cut once, so `0.1.0-rc1` must come out exactly as written.
+      flake.versionTemplate =
+        if lib.hasSuffix "-unstable" manifestVersion then
+          "${manifestVersion}-<lastModifiedDate>-<rev>"
+        else
+          manifestVersion;
 
       systems = [
         "aarch64-linux"

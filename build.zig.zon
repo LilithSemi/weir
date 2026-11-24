@@ -1,6 +1,6 @@
 .{
     .name = .weir,
-    .version = "0.1.0",
+    .version = "0.1.0-unstable",
     .fingerprint = 0x93848e0c20d4be2c,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
