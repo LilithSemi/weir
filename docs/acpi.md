@@ -19,12 +19,16 @@ into memory and links them. These match the emulated machine exactly.
 lays a minimum set into a static buffer and stamps every checksum:
 
 - RSDP, which points at the XSDT.
-- XSDT, which lists the FADT, the MADT, the RHCT and the SPCR.
+- XSDT, which lists the FADT, the MADT, the RHCT, the SPCR and the BGRT.
 - FADT, hardware-reduced, whose `X_DSDT` points at the DSDT. It claims ACPI 6.6,
   the first revision that defines the RISC-V MADT structures below.
 - MADT, one RINTC per hart plus the PLIC structure.
 - RHCT, the hart timebase, ISA string and MMU type.
 - SPCR, the 16550 console.
+- BGRT, the boot splash and its place on the first display that shows it.
+  Only when a splash is on a screen. The BMP is copied into the ACPI pool. The
+  pool of a board with less than 128 MiB of RAM is too small for it, and then
+  there is no BGRT.
 
 ## Interrupts
 

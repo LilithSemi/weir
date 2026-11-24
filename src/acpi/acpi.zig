@@ -16,6 +16,7 @@ const aml = @import("aml.zig");
 const madt = @import("madt.zig");
 const tables = @import("tables.zig");
 const conduit = @import("conduit");
+const early_display = @import("../display/early.zig");
 
 /// Build the table set referencing `dsdt` (raw AML) and report a summary. No
 /// paging here, so virtual == physical and the pool base is a plain address.
@@ -228,7 +229,13 @@ fn build(dsdt: ?[]const u8) !void {
     const rhct_phys = try b.addTable("RHCT", rhct, 1);
     const spcr = tables.spcr(soc.uart_base, soc.uart_io_width);
     const spcr_phys = try b.addTable("SPCR", std.mem.asBytes(&spcr), 2);
-    const xsdt_phys = try b.xsdt(&.{ fadt_phys, madt_phys, rhct_phys, spcr_phys });
+    var entries = [_]u64{ fadt_phys, madt_phys, rhct_phys, spcr_phys, 0 };
+    var count: usize = 4;
+    if (bootGraphics(&b)) |bgrt_phys| {
+        entries[count] = bgrt_phys;
+        count += 1;
+    }
+    const xsdt_phys = try b.xsdt(entries[0..count]);
     const rsdp_phys = try b.rsdp(xsdt_phys);
     // Publish through the shared RSDP accessor, the same one the UEFI config
     // table reads, so the OS finds these tables.
@@ -261,6 +268,21 @@ fn build(dsdt: ?[]const u8) !void {
     }
 
     reportChecksums(rsdp_phys, xsdt_phys, fadt_phys);
+}
+
+// The BGRT names the splash, so the OS can keep it on the screen while it
+// starts. The BMP goes to the ACPI pool, which the OS maps and keeps until it
+// has read the tables.
+fn bootGraphics(b: *almanac.Builder) ?u64 {
+    const offset = early_display.shownSplash() orelse return null;
+    const image_phys = b.addRaw(early_display.splashFile()) catch {
+        console.out.writeAll("[acpi] no BGRT, the splash does not fit in the ACPI pool\n") catch {};
+        return null;
+    };
+    const body = tables.bgrt(image_phys, offset.x, offset.y);
+    const table_phys = b.addTable("BGRT", std.mem.asBytes(&body), 1) catch return null;
+    console.out.print("[acpi] BGRT @ {x}, image @ {x}\n", .{ table_phys, image_phys }) catch {};
+    return table_phys;
 }
 
 fn reportChecksums(rsdp_phys: u64, xsdt_phys: u64, fadt_phys: u64) void {

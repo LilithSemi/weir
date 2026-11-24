@@ -1,4 +1,4 @@
-//! Bodies of the small fixed ACPI tables Weir writes: SPCR and RHCT.
+//! Bodies of the small fixed ACPI tables Weir writes: SPCR, RHCT and BGRT.
 //!
 //! A body is the part after the 36-byte SDT header. This file has no platform
 //! imports, so its tests run on the host.
@@ -18,6 +18,12 @@ pub fn spcr(uart_base: u64, io_width: u8) structs.SpcrBody {
         .baud_rate = 7,
         .stop_bits = 1,
     };
+}
+
+/// BGRT body for a BMP at `image_address` that is on the screen with its top
+/// left corner at `x`, `y`.
+pub fn bgrt(image_address: u64, x: u32, y: u32) structs.BgrtBody {
+    return .{ .status = 1, .image_address = image_address, .offset_x = x, .offset_y = y };
 }
 
 fn store(buf: []u8, off: usize, value: anytype) void {
@@ -102,4 +108,17 @@ test "an ISA node that is already even gets no pad" {
     try std.testing.expectEqual(@as(u16, 16), std.mem.readInt(u16, body[22..24], .little));
     try std.testing.expectEqual(@as(usize, 20 + 16 + 8 + 20), body.len);
     try std.testing.expectEqual(@as(u8, 1), body[20 + 16 + 7]); // MMU type: Sv48
+}
+
+test "the BGRT body names a BMP that is on the screen" {
+    const body = bgrt(0x8040_1000, 160, 140);
+    const expected = [_]u8{
+        1, 0, // version
+        1, // status: displayed
+        0, // image type: BMP
+        0x00, 0x10, 0x40, 0x80, 0, 0, 0, 0, // image address
+        160, 0, 0, 0, // offset x
+        140, 0, 0, 0, // offset y
+    };
+    try std.testing.expectEqualSlices(u8, &expected, std.mem.asBytes(&body));
 }

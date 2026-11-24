@@ -24,6 +24,18 @@ pub const Gas = extern struct {
     address: u64 align(1),
 };
 
+/// BGRT version 1 body: the boot image that the firmware shows.
+pub const BgrtBody = extern struct {
+    version: u16 align(1) = 1,
+    /// Bit 0: the image is on the screen now.
+    status: u8,
+    /// 0: a BMP file.
+    image_type: u8 = 0,
+    image_address: u64 align(1),
+    offset_x: u32 align(1),
+    offset_y: u32 align(1),
+};
+
 /// SPCR revision 2 body.
 pub const SpcrBody = extern struct {
     /// 0: full 16550.
@@ -140,6 +152,7 @@ fn checkLayout(comptime T: type, comptime size: usize) void {
 comptime {
     checkLayout(Gas, 12);
     checkLayout(SpcrBody, 44);
+    checkLayout(BgrtBody, 20);
     checkLayout(RhctBody, 20);
     checkLayout(RhctNodeHeader, 6);
     checkLayout(RhctIsaNode, 8);
