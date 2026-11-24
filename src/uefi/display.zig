@@ -1,16 +1,15 @@
-//! A framebuffer for each display of the device tree, and the graphics output
-//! protocol on it. A display with no fixed framebuffer gets one from the page
-//! pool, reserved in the memory map, so the OS can keep the picture.
+//! The graphics output protocol on the framebuffer of each display. The early
+//! display setup chose the framebuffers. Here they are reserved in the memory
+//! map, so the OS can keep the picture.
 
 const std = @import("std");
 const uefi = std.os.uefi;
 const soc = @import("soc");
 const console = @import("../console/console.zig");
 const gop = @import("../display/gop.zig");
-const harbor = @import("../display/harbor.zig");
+const early = @import("../display/early.zig");
 const handledb = @import("handledb.zig");
 const page_alloc = @import("page_alloc.zig");
-const placer = @import("framebuffer_place.zig");
 
 const Status = uefi.Status;
 const Gop = uefi.protocol.GraphicsOutput;
@@ -35,34 +34,22 @@ var states: [soc.displays.len]State = @splat(.{
 
 var pool: ?*page_alloc.Pool = null;
 
-/// Gives each display a framebuffer and starts it. Call when the page pool
-/// is new, before the first allocation of a loader. The framebuffers from
-/// the pool go below `pool_top`.
-pub fn setup(pages: *page_alloc.PageAllocator, memory_pool: *page_alloc.Pool, pool_top: usize) void {
+/// Reserves the framebuffer of each display and installs the protocol. Call
+/// when the page pool is new, before the first allocation of a loader.
+pub fn setup(pages: *page_alloc.PageAllocator, memory_pool: *page_alloc.Pool) void {
     pool = memory_pool;
-    // The framebuffers go to the top of the pool, one below the other, so
-    // the low memory stays in one piece for the OS image.
-    var top = pool_top;
-    for (soc.displays, &states) |display, *state| {
+    for (&states, 0..) |*state, index| {
         state.surface = null;
-        const driver: harbor.Display(harbor.Mmio) = .{ .bus = .{ .base = display.base } };
-        const mode = driver.mode() orelse {
-            console.err.print("[display] no mode that Weir can draw at {x}\n", .{display.base}) catch {};
+        const fb = early.framebuffer(index) orelse continue;
+        // A framebuffer outside the pool has no other user.
+        const in_pool = fb.address + fb.size > pages.base and fb.address < pages.end;
+        if (in_pool and !pages.allocAt(fb.address, fb.size, tag)) {
+            console.err.print("[display] the framebuffer at {x} is in use\n", .{fb.address}) catch {};
             continue;
-        };
-        const address = placer.place(pages, .{
-            .size = std.mem.alignForward(usize, mode.size(), page_alloc.page_size),
-            .alignment = harbor.alignment(mode.stride),
-            .fixed = range(display.fixed),
-            .scanout = range(display.scanout),
-        }, &top) orelse {
-            console.err.print("[display] no memory for the framebuffer at {x}\n", .{display.base}) catch {};
-            continue;
-        };
-        const surface: gop.Surface = .{ .pixels = @ptrFromInt(address), .mode = mode };
-        surface.clear();
-        driver.start(@intCast(address));
-
+        }
+        const surface = fb.surface;
+        const mode = surface.mode;
+        const address = fb.address;
         state.surface = surface;
         state.info = mode.info();
         state.mode = .{
@@ -77,17 +64,10 @@ pub fn setup(pages: *page_alloc.PageAllocator, memory_pool: *page_alloc.Pool, po
         if (!state.installed) {
             state.installed = handledb.install(null, &Gop.guid, @ptrCast(&state.protocol)) != null;
         }
-        console.out.print(
-            "[display] {d}x{d} {s}, framebuffer at {x}\n",
-            .{ mode.width, mode.height, mode.format.name(), address },
-        ) catch {};
     }
 }
 
-fn range(memory: ?soc.Framebuffer) ?placer.Range {
-    const m = memory orelse return null;
-    return .{ .base = m.base, .size = m.size };
-}
+const tag: page_alloc.Tag = .{ .kind = .reserved, .owner = .firmware };
 
 fn stateOf(protocol: *const Gop) ?*State {
     for (&states) |*state| {

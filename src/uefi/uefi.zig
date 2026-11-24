@@ -1281,16 +1281,15 @@ pub fn prepare(dtb: usize, hartid: usize, image_base: usize, image_size: usize) 
         const e = std.mem.alignForward(usize, r.base + r.len, 4096);
         if (poolPart(s, e)) |p| _ = pages.allocAt(p.start, p.end - p.start, boot_data_tag);
     }
-    // A disk image from the netboot is at the top of RAM. The boot loader
-    // reads it, so it stays until the OS has the memory.
-    var display_top = pages.end;
+    // A disk image from the netboot is at the top of RAM, below the
+    // framebuffers. The boot loader reads it, so it stays until the OS has
+    // the memory.
     if (netboot.region()) |r| {
         const s = r.base & ~@as(usize, 4095);
         const e = std.mem.alignForward(usize, r.base + r.len, 4096);
         if (poolPart(s, e)) |p| _ = pages.allocAt(p.start, p.end - p.start, boot_data_tag);
-        display_top = @min(display_top, s);
     }
-    display.setup(&pages, &pool, display_top);
+    display.setup(&pages, &pool);
 
     // Simple Text Output: real output, the rest succeed as no-ops.
     con_out_mode = .{

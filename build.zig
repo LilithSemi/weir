@@ -127,6 +127,7 @@ pub fn build(b: *std.Build) void {
     // device tree. Without it Weir uses its defaults and the device tree model.
     const board_info_path = b.option(std.Build.LazyPath, "board-info", "Board identity (zon) for the SMBIOS tables");
     const bios_date = b.option([]const u8, "bios-date", "SMBIOS BIOS release date, as MM/DD/YYYY") orelse "01/01/2026";
+    const boot_splash = b.option(std.Build.LazyPath, "boot-splash", "BMP image drawn at the center of each display at boot") orelse b.path("assets/boot-splash.bmp");
 
     const options = b.addOptions();
     options.addOption(bool, "has_aml", aml_path != null);
@@ -184,6 +185,7 @@ pub fn build(b: *std.Build) void {
     if (pe_app_path) |p| mod.addAnonymousImport("weir_pe_app", .{ .root_source_file = p });
     if (initrd_path) |p| mod.addAnonymousImport("weir_initrd", .{ .root_source_file = p });
     if (board_info_path) |p| mod.addAnonymousImport("board_info", .{ .root_source_file = p });
+    mod.addAnonymousImport("boot_splash", .{ .root_source_file = boot_splash });
 
     if (payload_path) |lp| {
         mod.addAnonymousImport("weir_payload", .{ .root_source_file = lp });
@@ -244,8 +246,10 @@ pub fn build(b: *std.Build) void {
         "src/acpi/madt.zig",
         "src/acpi/tables.zig",
         "src/boot/extlinux.zig",
+        "src/display/bmp.zig",
         "src/display/gop.zig",
         "src/display/harbor.zig",
+        "src/display/splash.zig",
         "src/flash/cfi.zig",
         "src/flash/spi_nor.zig",
         "src/layout.zig",

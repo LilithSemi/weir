@@ -26,6 +26,7 @@ const soc = @import("soc");
 const update_serial = @import("update/serial.zig");
 const update_uart = @import("update/uart.zig");
 const sd_trace = @import("drivers/sd_trace.zig");
+const early_display = @import("display/early.zig");
 const sdhci = @import("drivers/sdhci.zig");
 const netboot = @import("net/netboot.zig");
 
@@ -71,6 +72,9 @@ pub fn boot(hartid: usize, dtb: usize) void {
         "[fdt] using the build-embedded device tree\n",
     ) catch {};
     platform.report();
+
+    // The displays start before the slow steps, so the splash shows during them.
+    early_display.setup();
 
     // ACPI table source, in priority order:
     //  1. QEMU fw_cfg tables (a complete DSDT that matches the machine).
@@ -474,7 +478,8 @@ const raw_image_max: usize = @min(16 << 20, mem.kernel_read_size);
 /// not tied to one transport. Returns null when no device holds a raw PE.
 fn loadRawImage(hartid: usize, dtb: usize) ?Handoff {
     if (!storage.init()) return null;
-    const buf = @as([*]u8, @ptrFromInt(mem.kernel_read_base))[0..raw_image_max];
+    const room = if (mem.kernel_read_base < mem.usable_end) mem.usable_end - mem.kernel_read_base else 0;
+    const buf = @as([*]u8, @ptrFromInt(mem.kernel_read_base))[0..@min(raw_image_max, room)];
     for (storage.devices(), 0..) |d, i| {
         // Read sector 0 and check the DOS/PE 'MZ' magic before Weir reads a whole
         // image off a slow card.

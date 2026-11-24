@@ -87,7 +87,7 @@ pub const Surface = struct {
         return surface.pixels + y * surface.mode.stride + x * surface.mode.format.bytes();
     }
 
-    fn put(surface: Surface, x: usize, y: usize, pixel: BltPixel) void {
+    pub fn put(surface: Surface, x: usize, y: usize, pixel: BltPixel) void {
         const p = surface.at(x, y);
         switch (surface.mode.format) {
             .rgb565 => {

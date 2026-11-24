@@ -39,6 +39,7 @@ zig build -Ddtb=board.dtb
 | `-Drt-selftest` | Test the variable services after `ExitBootServices`, then stop. See [testing.md](testing.md). |
 | `-Dserial-update` | Offer the serial update mode before the boot manager. See [serial-update.md](serial-update.md). |
 | `-Dnetboot-first` | Do the netboot before the block devices. Used only with a modem node in the device tree. See [netboot.md](netboot.md). |
+| `-Dboot-splash=PATH` | BMP image drawn at the center of each display at boot. Default `assets/boot-splash.bmp`. See [device-tree.md](device-tree.md#displays). |
 | `-Dinitrd=PATH` | An initramfs to serve the kernel through LoadFile2. |
 | `-Dboard-info=PATH` | Board identity (zon) for the SMBIOS tables. See [smbios.md](smbios.md). |
 | `-Dbios-date=DATE` | SMBIOS BIOS release date, as MM/DD/YYYY. |

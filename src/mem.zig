@@ -48,3 +48,6 @@ pub const boot_stack_count: usize = layout.bootStacks(soc.ram_size, soc.hart_id_
 
 /// End of RAM from the SoC tree's /memory size.
 pub const ram_end_default = ram_base + soc.ram_size;
+/// The end of the RAM that the boot can use. The framebuffers of the displays
+/// are above it.
+pub var usable_end: usize = ram_end_default;

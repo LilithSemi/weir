@@ -162,9 +162,10 @@ tree. It reads the screen size, the stride and the pixel format from the
 registers of the display, so the node needs only its `reg`.
 
 A display node with no `memory-region` gets its framebuffer from Weir. Weir
-takes the memory from the top of RAM when the boot manager starts, writes
-zeros to it, gives the address to the display and turns the display on. The
-EFI memory map reports the framebuffer as reserved memory, so it stays in use
+takes the memory from the top of RAM early in the boot, before the storage
+and the netboot, writes zeros to it, gives the address to the display and
+turns the display on. The boot does not use the RAM above the lowest
+framebuffer. The EFI memory map reports the framebuffer as reserved memory, so it stays in use
 after the OS starts. Each display has its own framebuffer.
 
 The property `harbor,scanout-memory` on a display node gives the memory that
@@ -187,6 +188,20 @@ each:
 ```
 [display] 640x480 r5g6b5, framebuffer at 81f10000
 ```
+
+### Boot splash
+
+Weir draws a BMP at the center of each display when it turns the display on.
+The image is `assets/boot-splash.bmp`, or the file of `-Dboot-splash`. It must
+be an uncompressed BMP with 24 or 32 bits for each pixel, else the build fails.
+An image larger than a screen is not drawn on that screen, and Weir prints:
+
+```
+[display] the splash of 320x200 is larger than the screen
+```
+
+The image is in the firmware only when the tree has a display node. The ACPI
+BGRT table tells the OS where the image is, see [acpi.md](acpi.md).
 
 When the tree has a `simple-framebuffer` node, the FSBL writes zeros to the
 memory of its first `reg` entry after the memory bring-up and prints

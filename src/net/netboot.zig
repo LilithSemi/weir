@@ -289,7 +289,7 @@ pub fn close() void {
 fn place(size: u64) ?[]u8 {
     if (mem.small_layout or size == 0) return null;
     const floor = mem.kernel_read_base + mem.kernel_read_size;
-    const end = mem.ram_end_default;
+    const end = mem.usable_end;
     if (floor >= end or size > end - floor) return null;
     const len: usize = @intCast(size);
     const base = std.mem.alignBackward(usize, end - len, image_align);

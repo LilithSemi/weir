@@ -30,7 +30,7 @@ const tpm = @import("../tpm/tpm.zig");
 
 /// The part of a staging buffer that lies inside RAM. Empty when none does.
 fn staging(base: usize, size: usize) []u8 {
-    const end = mem.ram_end_default;
+    const end = mem.usable_end;
     const len = if (base < end) @min(size, end - base) else 0;
     return @as([*]u8, @ptrFromInt(base))[0..len];
 }
@@ -284,8 +284,8 @@ fn loadKernel(path: []const u8, kernel: []const u8) ?pe.Loaded {
             return null;
         }
         const base = std.mem.alignForward(usize, mem.kernel_read_base + mem.kernel_read_size, two_mib);
-        const end = std.math.add(usize, base, size) catch mem.ram_end_default + 1;
-        if (end > mem.ram_end_default) {
+        const end = std.math.add(usize, base, size) catch mem.usable_end + 1;
+        if (end > mem.usable_end) {
             console.err.print("[boot] extlinux: {s} needs {d} bytes and does not fit in RAM\n", .{ path, size }) catch {};
             return null;
         }
@@ -305,7 +305,7 @@ fn loadInitrd(filesystem: fs.Fs, path: []const u8, kernel: pe.Loaded) void {
     // ACPI pool, so the initrd starts at the page pool.
     const after = std.mem.alignForward(usize, kernel.base + kernel.size, two_mib);
     const base = @max(after, mem.page_pool_base orelse 0);
-    const room = if (base < mem.ram_end_default) mem.ram_end_default - base else 0;
+    const room = if (base < mem.usable_end) mem.usable_end - base else 0;
     const dst = @as([*]u8, @ptrFromInt(base))[0..room];
     const n = filesystem.readFile(path, dst) orelse {
         if (fat.fileSize(path)) |size| {
