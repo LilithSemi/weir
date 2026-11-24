@@ -809,18 +809,30 @@ pub const spi_controllers: []const SpiController = &spi_controllers_arr;
 // (the SD clock divider derives from it); it falls back to 50 MHz when the node
 // omits it. Absent on creek. `sdhci_base`/`sdhci_freq` above stay as the first
 // host, for callers that only want one.
-/// `bus_width` is the `bus-width` property of the node, 4 when it is absent.
-pub const SdhciController = struct { base: usize, freq: u32, bus_width: u32 = 4 };
+/// The SD host properties come from its node: `bus-width` (4 when absent),
+/// `cap-sd-highspeed` and `max-frequency` (0 when absent, no limit).
+pub const SdhciController = struct {
+    base: usize,
+    freq: u32,
+    bus_width: u32 = 4,
+    high_speed: bool = false,
+    max_hz: u32 = 0,
+};
 
-fn sdhciBusWidth(base: u64) u32 {
+fn sdhciProps(base: u64) struct { bus_width: u32, high_speed: bool, max_hz: u32 } {
     const dtb = @embedFile("soc_dtb");
     for (sdhci_ids) |id| {
         for (0..dt_reg.count(dtb, id)) |i| {
             const reg = dt_reg.nth(dtb, id, i) orelse continue;
-            if (reg.base == base) return dt_reg.nthPropU32(dtb, id, i, "bus-width") orelse 4;
+            if (reg.base != base) continue;
+            return .{
+                .bus_width = dt_reg.nthPropU32(dtb, id, i, "bus-width") orelse 4,
+                .high_speed = dt_reg.nthHasProp(dtb, id, i, "cap-sd-highspeed"),
+                .max_hz = dt_reg.nthPropU32(dtb, id, i, "max-frequency") orelse 0,
+            };
         }
     }
-    return 4;
+    return .{ .bus_width = 4, .high_speed = false, .max_hz = 0 };
 }
 
 /// Number of native SD/MMC hosts in the device tree.
@@ -839,7 +851,9 @@ const sdhci_controllers_arr: [sdhci_count]SdhciController = blk: {
                     (if (c.freq_hz) |hz| @as(u32, @intCast(hz)) else 50_000_000)
                 else
                     50_000_000,
-                .bus_width = sdhciBusWidth(r.base),
+                .bus_width = sdhciProps(r.base).bus_width,
+                .high_speed = sdhciProps(r.base).high_speed,
+                .max_hz = sdhciProps(r.base).max_hz,
             };
             i += 1;
         }

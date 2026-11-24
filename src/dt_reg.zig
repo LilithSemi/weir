@@ -169,6 +169,13 @@ pub fn nthPropU32(dtb: []const u8, compatible: []const u8, index: usize, name: [
     return std.mem.readInt(u32, value[0..cell_bytes], .big);
 }
 
+/// True when node number `index` of the nodes with this compatible has the
+/// property, with any value or none.
+pub fn nthHasProp(dtb: []const u8, compatible: []const u8, index: usize, name: []const u8) bool {
+    const node = find(dtb, .{ .compatible = .{ .id = compatible, .index = index } }, name) orelse return false;
+    return node.prop != null;
+}
+
 /// Cell number `index` of a property of the first node with this compatible.
 pub fn propCell(dtb: []const u8, compatible: []const u8, name: []const u8, index: usize) ?u32 {
     const node = find(dtb, .{ .compatible = .{ .id = compatible, .index = 0 } }, name) orelse return null;
@@ -205,6 +212,7 @@ fn tree(gpa: std.mem.Allocator, cells: u32) ![]u8 {
     try b.beginNode("uart@10000000");
     try b.propString("compatible", "ns16550a");
     try b.propU32("reg-shift", 2);
+    try b.prop("no-loopback-test", "");
     try b.propCells("reg", if (cells == 2) &.{ 0, 0x10000000, 0, 0x100 } else &.{ 0x10000000, 0x100 });
     try b.endNode();
     try b.beginNode("unit-id@10050000");
@@ -332,4 +340,13 @@ test "a node is found by its phandle" {
     try testing.expectEqual(@as(u64, 0x81e00000), r.base);
     try testing.expectEqual(@as(u64, 0x200000), r.size);
     try testing.expect(byPhandle(dtb, 8) == null);
+}
+
+test "a property with no value is present" {
+    const dtb = try tree(testing.allocator, 1);
+    defer testing.allocator.free(dtb);
+    try testing.expect(nthHasProp(dtb, "ns16550a", 0, "no-loopback-test"));
+    try testing.expect(nthHasProp(dtb, "ns16550a", 0, "reg-shift"));
+    try testing.expect(!nthHasProp(dtb, "ns16550a", 0, "cap-sd-highspeed"));
+    try testing.expect(!nthHasProp(dtb, "ns16550a", 1, "reg-shift"));
 }
