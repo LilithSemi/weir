@@ -41,7 +41,7 @@ const SbiReset = enum(usize) { shutdown = 0, cold_reboot = 1, warm_reboot = 2 };
 fn sbiReset(kind: SbiReset) noreturn {
     asm volatile ("ecall"
         :
-        : [kind] "{x10}" (@intFromEnum(kind)),
+        : [kind] "{x10}" (@backingInt(kind)),
           [reason] "{x11}" (0),
           [fid] "{x16}" (0),
           [eid] "{x17}" (0x53525354),
