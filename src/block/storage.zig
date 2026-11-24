@@ -133,7 +133,7 @@ pub fn init() bool {
     // the slice is safe even when there are none. The host reads the card CID at
     // bring-up, so its identity metadata is populated too.
     for (soc.sdhci_controllers, 0..) |ctrl, idx| {
-        if (sdhci.init(idx, ctrl.base, ctrl.freq))
+        if (sdhci.init(idx, ctrl.base, ctrl.freq, ctrl.bus_width))
             append(.sdhci, sdhci.device(idx), ctrl.base, infoFromCid(sdhci.cidInfo(idx)));
     }
 

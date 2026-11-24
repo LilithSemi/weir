@@ -23,9 +23,12 @@ clock rate from `clock-frequency` where it needs one.
 | DDR controller | `harbor,sdram-controller` | training window (FSBL) |
 | TPM | `tcg,tpm-tis-mmio` | TIS base |
 | RTC | `google,goldfish-rtc` | wall clock |
-| SD/MMC host | `harbor,sdhci`, `harbor,sdio` | block base, clock |
+| SD/MMC host | `harbor,sdhci`, `harbor,sdio` | block base, clock, `bus-width` |
 | SPI master | `harbor,spi`, `midstall,harbor-spi` | SPI base for an SD card |
 | Display | `harbor,display` | register base, fixed framebuffer |
+
+An SD/MMC host with `bus-width = <1>` runs its card at 1 bit. Other values and
+no property give 4 bits. A card that refuses the change to 4 bits stays at 1 bit.
 
 The console UART, the CLINT, and the memory node are the minimum a board needs.
 An absent class turns its feature off or falls back to a default.

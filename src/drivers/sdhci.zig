@@ -17,8 +17,11 @@ var devs: [soc.sdhci_count]conduit.driver.harbor_sdio.HarborSdio = undefined; //
 pub const Cid = conduit.driver.harbor_sdio.HarborSdio.Cid;
 
 /// Bring up host `idx` and initialise the inserted card. Returns true on success.
-pub fn init(idx: usize, base: usize, freq: u32) bool {
-    devs[idx] = conduit.driver.harbor_sdio.bind(conduit.Mmio.direct(base), .{ .freq = freq });
+pub fn init(idx: usize, base: usize, freq: u32, bus_width: u32) bool {
+    devs[idx] = conduit.driver.harbor_sdio.bind(conduit.Mmio.direct(base), .{
+        .freq = freq,
+        .bus_width = if (bus_width == 1) .one else .four,
+    });
     return devs[idx].cardPresent();
 }
 
