@@ -65,3 +65,16 @@ pub fn fault(idx: usize) [2]u32 {
     const f = devs[idx].fault;
     return .{ f.int_status, f.card_status orelse 0xffff_ffff };
 }
+
+/// The bus mode of the card on host `idx`.
+pub const Speed = struct { high_speed: bool, clock_hz: u32, bus_width: u8 };
+
+pub fn speed(idx: usize) Speed {
+    if (soc.sdhci_count == 0) unreachable;
+    const dev = &devs[idx];
+    return .{
+        .high_speed = dev.in_high_speed,
+        .clock_hz = dev.clock_hz,
+        .bus_width = if (dev.bus_width == .four) 4 else 1,
+    };
+}

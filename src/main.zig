@@ -179,6 +179,7 @@ fn bringUpStorage() void {
             "[weir] sd: device {d} {s}: {d} blocks ({d} MiB), {d} B/blk\n",
             .{ i, @tagName(d.kind), dev.num_blocks, mib, dev.block_size },
         ) catch {};
+        if (d.kind == .sdhci) printSdSpeed(d.base);
         // Show the device identity when it carries one (an SD/MMC CID).
         if (d.info.known()) {
             const info = d.info;
@@ -548,6 +549,18 @@ fn sdWriteFault(entry: *const storage.Device) ?[2]u32 {
         if (host.base == entry.base) return sdhci.fault(idx);
     }
     return null;
+}
+
+fn printSdSpeed(base: u64) void {
+    for (platform.sdhciControllers(), 0..) |host, idx| {
+        if (host.base != base) continue;
+        const mode = sdhci.speed(idx);
+        console.out.print("[weir] sd:   {s} speed, {d} kHz, {d} bit\n", .{
+            if (mode.high_speed) "high" else "default",
+            mode.clock_hz / 1000,
+            mode.bus_width,
+        }) catch {};
+    }
 }
 
 fn rescanStorage() []const storage.Device {
