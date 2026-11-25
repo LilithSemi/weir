@@ -31,7 +31,7 @@ The code lives in `src/fsbl/`.
 3. **Console.** It binds the UART and prints its progress, so a hang shows how
    far the boot got.
 4. **Memory.** It brings up the memory controller, and trains it when the tree
-   has a `training` node. A failure halts the boot.
+   has a DDR3 training window or a `training` node. A failure halts the boot.
 5. **Load.** It copies the main image out of flash into DRAM and verifies it.
 6. **Measure.** It measures the loaded image into the TPM before it runs, as the
    root of the measured-boot chain.
@@ -50,10 +50,35 @@ ids of the controller node, and its log lines start with that type:
 | `harbor,sdr-sdram` | `[fsbl] sdr:` | `[fsbl] sdr: no calibration needed` |
 | neither | `[fsbl] ram:` | `[fsbl] ram: ready` |
 
-A DDR3 controller without a `training` node calibrates itself and holds the
+A DDR3 controller with no training window calibrates itself and holds the
 first access until it is ready. An SDR controller has no calibration.
 
-`src/fsbl/ddr_train.zig` is a generic training engine for controllers that do the
+### DDR3 training window
+
+A Harbor DDR3 controller built for runtime training has a training window. The
+controller node gives its address in `harbor,training-base`. The window and the
+SPD registers take the top 4 KiB of the DRAM, so the `reg` of the node is
+already 4 KiB smaller.
+
+This controller does not train until firmware starts it, and each DRAM access
+waits with no error until training ends. The FSBL keeps its state in SRAM, so
+the tree must have an `mmio-sram` node, or the FSBL build fails.
+`src/fsbl/ddr3_window.zig` waits until the controller is ready, starts the
+hardware sequence, and waits for the result. Then the FSBL prints the delays of
+each lane and runs the memtest:
+
+```
+[fsbl] ddr3: training window at 8ffff000
+[fsbl] ddr3: trained, 1 attempt(s)
+[fsbl] ddr3: rank 0 lane 0: pass wdqs 0 gate 41 rdqs 15 wdq 10 wlat 0
+```
+
+When training fails, the FSBL prints the fail code, the rank and the lane, and
+halts.
+
+### Knob window
+
+`src/fsbl/ddr_train.zig` is a generic training engine for earlier controllers that do the
 JEDEC init in hardware but leave the PHY delay knobs open for the CPU to centre
 at boot. It reads a `training` node from the device tree at compile time, the
 same way `soc.zig` reads the SoC addresses. For each knob it sweeps the tap

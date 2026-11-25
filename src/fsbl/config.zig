@@ -40,6 +40,12 @@ pub const hart_count: usize = soc.hart_count;
 /// from them.
 pub const sdram_ids: []const []const u8 = soc.sdram_ids;
 
+/// The DDR3 training window. Null when the controller has none.
+pub const ddr3_training = soc.ddr3_training;
+
+/// The FSBL keeps its state in on-chip SRAM, not DRAM.
+pub const sram_present = soc.sram_present;
+
 /// Memory-mapped (XIP) base of the SPI flash holding the main image.
 pub const flash_base: usize = soc.flash_base;
 

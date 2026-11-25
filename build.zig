@@ -252,6 +252,7 @@ pub fn build(b: *std.Build) void {
         "src/display/splash.zig",
         "src/flash/cfi.zig",
         "src/flash/spi_nor.zig",
+        "src/fsbl/ddr3_window.zig",
         "src/layout.zig",
         "src/net/esp_at_test.zig",
         "src/net/line.zig",

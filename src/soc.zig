@@ -909,3 +909,29 @@ test "the uart clock comes from the uart node, not from a default" {
     try std.testing.expect(firstClockHz(.uart) != null);
     try std.testing.expectEqual(firstClockHz(.uart).?, @as(u64, uart_clock));
 }
+
+/// The training window of a Harbor DDR3 controller. Null when the build has none.
+pub const ddr3_training: ?Ddr3Training = if (has_dt) ddr3TrainingFrom(@embedFile("soc_dtb")) else null;
+
+pub const Ddr3Training = struct {
+    base: usize,
+    lanes: u32,
+    ranks: u32,
+};
+
+fn ddr3TrainingFrom(dtb: []const u8) ?Ddr3Training {
+    @setEvalBranchQuota(4_000_000);
+    const id = "harbor,ddr3-sdram";
+    const base = dt_reg.propU32(dtb, id, "harbor,training-base") orelse return null;
+    return .{
+        .base = base,
+        .lanes = (dt_reg.propU32(dtb, id, "data-width") orelse 16) / 8,
+        .ranks = dt_reg.propU32(dtb, id, "harbor,sdram-ranks") orelse 1,
+    };
+}
+
+/// The tree has on-chip SRAM, where the FSBL keeps its state.
+pub const sram_present: bool = has_dt and blk: {
+    @setEvalBranchQuota(4_000_000);
+    break :blk dt_reg.first(@embedFile("soc_dtb"), "mmio-sram") != null;
+};
