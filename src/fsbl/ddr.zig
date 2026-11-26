@@ -220,6 +220,11 @@ fn trainWindow(con: *std.Io.Writer, t: std.meta.Child(@TypeOf(cfg.ddr3_training)
             .{ s.fail_code.name(), s.fail_rank, s.fail_lane },
         ) catch {},
         error.Rejected => con.writeAll(prefix ++ "the controller refused the training command\n") catch {},
+        error.InitFailed => {
+            con.print(prefix ++ "dram init failed, status {x:0>8}\n", .{@as(u32, @bitCast(s))}) catch {};
+            if (s.phy_init_timeout) con.writeAll(prefix ++ "the phy did not get idelay ready in time\n") catch {};
+            return false;
+        },
         error.Timeout => con.print(prefix ++ "no training result, state {d}\n", .{@backingInt(s.state)}) catch {},
     }
     for (0..@min(t.ranks, 2)) |rank| for (0..@min(t.lanes, 8)) |i| {

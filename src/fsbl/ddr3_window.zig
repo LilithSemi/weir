@@ -70,7 +70,12 @@ pub const Status = packed struct(u32) {
     fail_code: Fail,
     fail_lane: u3,
     fail_rank: u1,
-    reserved1: u4,
+    init_done: bool,
+    /// Stays set until reset. The controller does not try the init again.
+    init_failed: bool,
+    /// The 7-series PHY did not get IDELAYCTRL ready in time.
+    phy_init_timeout: bool,
+    phy_idelay_ready: bool,
 };
 
 pub const LaneResult = packed struct(u32) {
@@ -105,7 +110,7 @@ pub const poll_max: u32 = 1 << 24;
 /// Status reads between two progress lines.
 pub const report_every: u32 = 1 << 20;
 
-pub const Error = error{ Timeout, Rejected, Failed };
+pub const Error = error{ Timeout, Rejected, Failed, InitFailed };
 
 pub fn Window(comptime Bus: type) type {
     return struct {
@@ -152,10 +157,17 @@ pub fn Window(comptime Bus: type) type {
             for (0..self.polls) |i| {
                 const s = self.status();
                 if (i % report_every == 0) if (self.report) |w| w.print(
-                    "[fsbl] ddr3: status {x:0>8} state {d} after {d} reads\n",
-                    .{ @as(u32, @bitCast(s)), @backingInt(s.state), i },
+                    "[fsbl] ddr3: status {x:0>8} state {d} init done {d} failed {d} phy timeout {d} idelay ready {d} after {d} reads\n",
+                    .{
+                        @as(u32, @bitCast(s)),            @backingInt(s.state),
+                        @intFromBool(s.init_done),        @intFromBool(s.init_failed),
+                        @intFromBool(s.phy_init_timeout), @intFromBool(s.phy_idelay_ready),
+                        i,
+                    },
                 ) catch {};
                 if (ready(s)) return s;
+                // The controller does not try the init again, so the state stays 0.
+                if (s.init_failed) return error.InitFailed;
             }
             return error.Timeout;
         }
@@ -181,7 +193,7 @@ pub const Mmio = struct {
 };
 
 const Fake = struct {
-    const Mode = enum { firmware_start, auto, fail, reject, dead };
+    const Mode = enum { firmware_start, auto, fail, reject, dead, init_failed };
 
     mode: Mode,
     reads: u32 = 0,
@@ -193,6 +205,10 @@ const Fake = struct {
         var s: Status = @bitCast(@as(u32, 0));
         switch (self.mode) {
             .dead => return 0,
+            .init_failed => {
+                s.init_failed = self.reads > 2;
+                s.phy_init_timeout = s.init_failed;
+            },
             .reject => {
                 s.state = .firmware;
                 s.reject = self.started;
@@ -292,6 +308,18 @@ test "a window that does not answer times out" {
     try std.testing.expectEqual(@as(u32, 1000), fake.reads);
 }
 
+test "a failed init stops the wait" {
+    var fake: Fake = .{ .mode = .init_failed };
+    try std.testing.expectError(error.InitFailed, fakeWindow(&fake).train());
+    try std.testing.expectEqual(@as(u32, 3), fake.reads);
+}
+
+test "the init bits are at the top of the status word" {
+    const s: Status = @bitCast(@as(u32, 0xa000_0000));
+    try std.testing.expect(s.init_failed and s.phy_idelay_ready);
+    try std.testing.expect(!s.init_done and !s.phy_init_timeout);
+}
+
 test "a lane read selects the lane and rank" {
     var fake: Fake = .{ .mode = .auto };
     const r = fakeWindow(&fake).lane(1, 2);
@@ -308,5 +336,5 @@ test "a wait reports the status on its first read" {
     var w = fakeWindow(&fake);
     w.report = &out;
     _ = try w.train();
-    try std.testing.expectEqualStrings("[fsbl] ddr3: status 00002000 state 2 after 0 reads\n", out.buffered());
+    try std.testing.expectEqualStrings("[fsbl] ddr3: status 00002000 state 2 init done 0 failed 0 phy timeout 0 idelay ready 0 after 0 reads\n", out.buffered());
 }
