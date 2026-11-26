@@ -5,8 +5,8 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .conduit = .{
-            .url = "git+https://git.lilithsemi.com/LilithSemi/conduit#e32a83ec03f3a9b0f026e0044eaf6f2a7b579a71",
-            .hash = "conduit-0.1.0-R_mFrP3MCACY-ToQHAX__VHHmt3B-uvyxBUxwgjDwgaY",
+            .url = "git+https://git.lilithsemi.com/LilithSemi/conduit#7b2b41ca00d5832982bae8b1376146b5f654142c",
+            .hash = "conduit-0.1.0-R_mFrLXYCAAPYcR4XMfg9R5uE2NSL0FgS2qHLj__6bDE",
         },
         .dtree = .{
             .url = "git+https://git.lilithsemi.com/LilithSemi/dtree#63fe0a7292ca2df829bc3d66d86291416c657cd7",
