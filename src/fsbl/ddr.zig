@@ -208,7 +208,7 @@ pub fn init(con: *std.Io.Writer) bool {
 /// Trains through the window of a Harbor DDR3 controller and prints the
 /// result of each lane. Returns false when the controller did not train.
 fn trainWindow(con: *std.Io.Writer, t: std.meta.Child(@TypeOf(cfg.ddr3_training))) bool {
-    const window: ddr3_window.Window(ddr3_window.Mmio) = .{ .bus = .{}, .base = t.base };
+    const window: ddr3_window.Window(ddr3_window.Mmio) = .{ .bus = .{}, .base = t.base, .report = con };
     con.print(prefix ++ "training window at {x}\n", .{t.base}) catch {};
     const result = window.train();
     const s = window.status();

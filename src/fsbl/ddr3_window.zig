@@ -100,7 +100,10 @@ const Reg = enum(usize) {
 /// Status reads before the FSBL stops a wait. The controller has its own
 /// cycle bound on the training run, so this limit only catches a window that
 /// does not answer.
-pub const poll_max: u32 = 1 << 28;
+pub const poll_max: u32 = 1 << 24;
+
+/// Status reads between two progress lines.
+pub const report_every: u32 = 1 << 20;
 
 pub const Error = error{ Timeout, Rejected, Failed };
 
@@ -109,6 +112,8 @@ pub fn Window(comptime Bus: type) type {
         bus: Bus,
         base: usize,
         polls: u32 = poll_max,
+        /// Gets the status on the first read of a wait and every `report_every` reads.
+        report: ?*std.Io.Writer = null,
 
         const Self = @This();
 
@@ -144,8 +149,12 @@ pub fn Window(comptime Bus: type) type {
         }
 
         fn waitFor(self: Self, comptime ready: fn (Status) bool) Error!Status {
-            for (0..self.polls) |_| {
+            for (0..self.polls) |i| {
                 const s = self.status();
+                if (i % report_every == 0) if (self.report) |w| w.print(
+                    "[fsbl] ddr3: status {x:0>8} state {d} after {d} reads\n",
+                    .{ @as(u32, @bitCast(s)), @backingInt(s.state), i },
+                ) catch {};
                 if (ready(s)) return s;
             }
             return error.Timeout;
@@ -290,4 +299,14 @@ test "a lane read selects the lane and rank" {
     try std.testing.expect(r.result.pass);
     try std.testing.expectEqual(@as(u8, 0x0d), r.taps.write_dqs);
     try std.testing.expectEqual(@as(u8, 0x0a), r.taps.write_dq);
+}
+
+test "a wait reports the status on its first read" {
+    var fake: Fake = .{ .mode = .auto };
+    var buf: [256]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&buf);
+    var w = fakeWindow(&fake);
+    w.report = &out;
+    _ = try w.train();
+    try std.testing.expectEqualStrings("[fsbl] ddr3: status 00002000 state 2 after 0 reads\n", out.buffered());
 }
